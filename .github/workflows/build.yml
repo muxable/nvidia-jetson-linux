@@ -1,0 +1,27 @@
+name: Build
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build:
+    runs-on: ubuntu-18.04
+    steps:
+    - uses: actions/checkout@v3
+    - run: |
+        wget http://releases.linaro.org/components/toolchain/binaries/7.3-2018.05/aarch64-linux-gnu/gcc-linaro-7.3.1-2018.05-x86_64_aarch64-linux-gnu.tar.xz
+        tar xf gcc-linaro-7.3.1-2018.05-x86_64_aarch64-linux-gnu.tar.xz
+        export CROSS_COMPILE=$(pwd)/gcc-linaro-7.3.1-2018.05-x86_64_aarch64-linux-gnu/bin/aarch64-linux-gnu-
+        export LOCALVERSION=-tegra
+        mkdir out
+        export TEGRA_KERNEL_OUT=$(pwd)/out
+        cd kernel/kernel-4.9
+        make ARCH=arm64 O=$TEGRA_KERNEL_OUT tegra_defconfig
+        make ARCH=arm64 O=$TEGRA_KERNEL_OUT -j$(nproc)
+    - uses: actions/upload-artifact@v3
+      with:
+        name: kernel
+        path: out/

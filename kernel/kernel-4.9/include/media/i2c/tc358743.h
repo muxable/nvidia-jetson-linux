@@ -28,11 +28,19 @@
 #ifndef _TC358743_
 #define _TC358743_
 
+enum tc358743_csi_port {
+	CSI_TX_NONE = 0,
+	CSI_TX_0,
+	CSI_TX_1,
+	CSI_TX_BOTH
+};
+
 enum tc358743_ddc5v_delays {
 	DDC5V_DELAY_0_MS,
 	DDC5V_DELAY_50_MS,
 	DDC5V_DELAY_100_MS,
 	DDC5V_DELAY_200_MS,
+	DDC5V_DELAY_MAX = DDC5V_DELAY_200_MS,
 };
 
 enum tc358743_hdmi_detection_delay {
@@ -43,6 +51,15 @@ enum tc358743_hdmi_detection_delay {
 };
 
 struct tc358743_platform_data {
+	/* GPIOs */
+	int reset_gpio;	
+
+	#ifdef CONFIG_V4L2_FWNODE
+	struct v4l2_fwnode_endpoint endpoint;
+	#else
+	struct v4l2_of_endpoint endpoint;
+	#endif
+
 	/* System clock connected to REFCLK (pin H5) */
 	u32 refclk_hz; /* 26 MHz, 27 MHz or 42 MHz */
 
@@ -54,6 +71,9 @@ struct tc358743_platform_data {
 	enum tc358743_ddc5v_delays ddc5v_delay;
 
 	bool enable_hdcp;
+
+	/* CSI Output */
+	enum tc358743_csi_port csi_port;  // TODO: Should this be port-index?
 
 	/*
 	 * The FIFO size is 512x32, so Toshiba recommend to set the default FIFO

@@ -15,7 +15,8 @@ jobs:
         docker build -t image .
         docker create -it --name container image bash
         docker cp container:/work/build .
+        tar -czvf kernel-arm64.tar.gz build
     - uses: actions/upload-artifact@v3
       with:
         name: kernel-arm64
-        path: build/
+        path: kernel-arm64.tar.gz

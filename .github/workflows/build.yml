@@ -8,15 +8,7 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-18.04
+    runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v3
-    - run: |
-        docker build -t image .
-        docker create -it --name container image bash
-        docker cp container:/work/build .
-        tar -czvf kernel-arm64.tar.gz build
-    - uses: actions/upload-artifact@v3
-      with:
-        name: kernel-arm64
-        path: kernel-arm64.tar.gz
+    - run: docker build .  # just ensure it builds

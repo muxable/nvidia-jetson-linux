@@ -76,6 +76,7 @@
 #define MASK_CEC_RINT                         0x0004
 #define MASK_IR_EINT                          0x0002
 #define MASK_IR_DINT                          0x0001
+#define MASK_INT_STATUS_MASK_ALL        0x0F3F
 
 #define INTMASK                               0x0016
 #define MASK_AMUTE_MSK                        0x0400

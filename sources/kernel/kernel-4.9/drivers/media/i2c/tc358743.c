@@ -1,30 +1,8 @@
-/*
- * tc358743 - Toshiba HDMI to CSI-2 bridge
- *
- * Copyright 2015 Cisco Systems, Inc. and/or its affiliates. All rights
- * reserved.
- *
- * This program is free software; you may redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; version 2 of the License.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
- * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
- * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
- * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
- * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
- * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
- * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
- *
- */
-
-/*
- * References (c = chapter, p = page):
- * REF_01 - Toshiba, TC358743XBG (H2C), Functional Specification, Rev 0.60
- * REF_02 - Toshiba, TC358743XBG_HDMI-CSI_Tv11p_nm.xls
- */
-
+/*		
+* References (c = chapter, p = page):		
+* REF_01 - Toshiba, TC358743XBG (H2C), Functional Specification, Rev 0.60
+* REF_02 - Toshiba, TC358743XBG_HDMI-CSI_Tv11p_nm.xls
+*/
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/slab.h>
@@ -33,6 +11,7 @@
 #include <linux/delay.h>
 #include <linux/gpio/consumer.h>
 #include <linux/interrupt.h>
+#include <linux/timer.h>
 #include <linux/videodev2.h>
 #include <linux/workqueue.h>
 #include <linux/v4l2-dv-timings.h>
@@ -42,9 +21,30 @@
 #include <media/v4l2-ctrls.h>
 #include <media/v4l2-event.h>
 #include <media/v4l2-of.h>
+#include <media/camera_common.h>
 #include <media/i2c/tc358743.h>
 
+#include <dt-bindings/gpio/tegra-gpio.h>
+#include <linux/slab.h>
+#include <linux/uaccess.h>
+#include <linux/gpio.h>
+#include <linux/module.h>
+
+#include <linux/seq_file.h>
+#include <linux/of.h>
+#include <linux/of_device.h>
+#include <linux/of_gpio.h>
+
+#include <linux/i2c-dev.h>
+#include <linux/fs.h>
+
+// #include <media/v4l2-chip-ident.h>
+#include <media/tegra-v4l2-camera.h>
+#include <media/soc_camera.h>
+
+
 #include "tc358743_regs.h"
+
 
 static int debug;
 module_param(debug, int, 0644);
@@ -56,10 +56,80 @@ MODULE_AUTHOR("Mikhail Khelik <mkhelik@cisco.com>");
 MODULE_AUTHOR("Mats Randgaard <matrandg@cisco.com>");
 MODULE_LICENSE("GPL");
 
+#define DELAY_ENABLE_INTERRUPT_MS 2000
+
+/* mode */
+enum {
+	tc358743_MODE_1280X720,
+	tc358743_MODE_1920X1080,
+};
+
+/* frame rate */
+static const int tc358743_30_60fps[] = {
+	30,
+	50,
+	60,
+};
+
+/* frame format */
+static const struct camera_common_frmfmt tc358743_frmfmt[] = {
+	{{1280,  720}, tc358743_30_60fps, 3, 0, tc358743_MODE_1280X720},//framme format set "tc358743_30_60fps, 3, 1,
+	{{1920, 1080}, tc358743_30_60fps, 3, 0, tc358743_MODE_1920X1080},
+};
+
+// static const struct camera_common_colorfmt tc358743_color_fmts[] = {
+// 	{
+// 		MEDIA_BUS_FMT_SRGGB12_1X12,
+// 		V4L2_COLORSPACE_SRGB,
+// 		V4L2_PIX_FMT_SRGGB12,
+// 	},
+// 	{
+// 		MEDIA_BUS_FMT_UYVY8_1X16,
+// 		V4L2_COLORSPACE_SRGB,
+// 		V4L2_PIX_FMT_UYVY,
+// 	},
+// };
+
 #define EDID_NUM_BLOCKS_MAX 8
 #define EDID_BLOCK_SIZE 128
 
 #define I2C_MAX_XFER_SIZE  (EDID_BLOCK_SIZE + 2)
+
+
+static u8 edid[] = {
+	0x00,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0x00,
+	0x52,0x62,0x88,0x88,0x00,0x88,0x88,0x88,
+	0x1C,0x15,0x01,0x03,0x80,0x00,0x00,0x78,
+	0x0A,0xEE,0x91,0xA3,0x54,0x4C,0x99,0x26,
+	0x0F,0x50,0x54,0x00,0x00,0x00,0x01,0x01,
+	0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x01,
+	0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x1D,
+	0x00,0x72,0x51,0xD0,0x1E,0x20,0x6E,0x28,
+	0x55,0x00,0xC4,0x8E,0x21,0x00,0x00,0x1E,
+	0x8C,0x0A,0xD0,0x8A,0x20,0xE0,0x2D,0x10,
+	0x10,0x3E,0x96,0x00,0x13,0x8E,0x21,0x00,
+	0x00,0x1E,0x00,0x00,0x00,0xFC,0x00,0x54,
+	0x6F,0x73,0x68,0x69,0x62,0x61,0x2D,0x48,
+	0x32,0x43,0x0A,0x20,0x00,0x00,0x00,0xFD,
+	0x00,0x3B,0x3D,0x0F,0x2E,0x0F,0x1E,0x0A,
+	0x20,0x20,0x20,0x20,0x20,0x20,0x01,0x4F,
+	0x02,0x03,0x22,0x44,0x4F,0x84,0x13,0x03,
+	0x02,0x12,0x11,0x01,0x20,0x21,0x22,0x3C,
+	0x3D,0x3E,0x10,0x1F,0x23,0x09,0x07,0x07,
+	0x66,0x03,0x0C,0x00,0x30,0x00,0x80,0xE3,
+	0x00,0x7F,0x8C,0x0A,0xD0,0x8A,0x20,0xE0,
+	0x2D,0x10,0x10,0x3E,0x96,0x00,0xC4,0x8E,
+	0x21,0x00,0x00,0x18,0x8C,0x0A,0xD0,0x8A,
+	0x20,0xE0,0x2D,0x10,0x10,0x3E,0x96,0x00,
+	0x13,0x8E,0x21,0x00,0x00,0x18,0x8C,0x0A,
+	0xA0,0x14,0x51,0xF0,0x16,0x00,0x26,0x7C,
+	0x43,0x00,0x13,0x8E,0x21,0x00,0x00,0x98,
+	0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+	0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+	0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+	0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+	0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x15
+};
 
 static const struct v4l2_dv_timings_cap tc358743_timings_cap = {
 	.type = V4L2_DV_BT_656_1120,
@@ -76,20 +146,25 @@ static const struct v4l2_dv_timings_cap tc358743_timings_cap = {
 
 struct tc358743_state {
 	struct tc358743_platform_data pdata;
-	struct v4l2_of_bus_mipi_csi2 bus;
+	// struct v4l2_of_bus_mipi_csi2 bus;
 	struct v4l2_subdev sd;
 	struct media_pad pad;
 	struct v4l2_ctrl_handler hdl;
 	struct i2c_client *i2c_client;
-	/* CONFCTL is modified in ops and tc358743_hdmi_sys_int_handler */
-	struct mutex confctl_mutex;
+	bool enabled;	
+	bool format_changed;
 
 	/* controls */
 	struct v4l2_ctrl *detect_tx_5v_ctrl;
 	struct v4l2_ctrl *audio_sampling_rate_ctrl;
 	struct v4l2_ctrl *audio_present_ctrl;
 
+	/* work queues */
+	struct workqueue_struct *work_queues;
 	struct delayed_work delayed_work_enable_hotplug;
+	struct delayed_work delayed_work_enable_interrupt;
+	struct work_struct process_isr;
+	struct mutex isr_lock;
 
 	/* edid  */
 	u8 edid_blocks_written;
@@ -100,18 +175,25 @@ struct tc358743_state {
 	struct gpio_desc *reset_gpio;
 };
 
-static void tc358743_enable_interrupts(struct v4l2_subdev *sd,
-		bool cable_connected);
-static int tc358743_s_ctrl_detect_tx_5v(struct v4l2_subdev *sd);
-
 static inline struct tc358743_state *to_state(struct v4l2_subdev *sd)
 {
 	return container_of(sd, struct tc358743_state, sd);
 }
 
+// Early declares required
+static void tc358743_enable_interrupts(struct v4l2_subdev *sd,
+		bool cable_connected);
+static int tc358743_s_ctrl_detect_tx_5v(struct v4l2_subdev *sd);
+static void tc358743_init_interrupts(struct v4l2_subdev *sd);
+static int tc358743_s_dv_timings(
+	struct v4l2_subdev *sd, struct v4l2_dv_timings *timings);
+static void tc358743_set_csi(struct v4l2_subdev *sd);
+static int tc358743_s_edid(struct v4l2_subdev *sd,
+	struct v4l2_subdev_edid *edid);
+
 /* --------------- I2C --------------- */
 
-static void i2c_rd(struct v4l2_subdev *sd, u16 reg, u8 *values, u32 n)
+static int i2c_rd(struct v4l2_subdev *sd, u16 reg, u8 *values, u32 n)
 {
 	struct tc358743_state *state = to_state(sd);
 	struct i2c_client *client = state->i2c_client;
@@ -136,7 +218,9 @@ static void i2c_rd(struct v4l2_subdev *sd, u16 reg, u8 *values, u32 n)
 	if (err != ARRAY_SIZE(msgs)) {
 		v4l2_err(sd, "%s: reading register 0x%x from 0x%x failed\n",
 				__func__, reg, client->addr);
+		return -1;
 	}
+	return err != ARRAY_SIZE(msgs);
 }
 
 static void i2c_wr(struct v4l2_subdev *sd, u16 reg, u8 *values, u32 n)
@@ -192,62 +276,66 @@ static void i2c_wr(struct v4l2_subdev *sd, u16 reg, u8 *values, u32 n)
 				n, reg);
 	}
 }
-
-static noinline u32 i2c_rdreg(struct v4l2_subdev *sd, u16 reg, u32 n)
-{
-	__le32 val = 0;
-
-	i2c_rd(sd, reg, (u8 __force *)&val, n);
-
-	return le32_to_cpu(val);
-}
-
-static noinline void i2c_wrreg(struct v4l2_subdev *sd, u16 reg, u32 val, u32 n)
-{
-	__le32 raw = cpu_to_le32(val);
-
-	i2c_wr(sd, reg, (u8 __force *)&raw, n);
-}
-
 static u8 i2c_rd8(struct v4l2_subdev *sd, u16 reg)
 {
-	return i2c_rdreg(sd, reg, 1);
+	u8 val;
+
+	i2c_rd(sd, reg, &val, 1);
+	//v4l2_info(sd, "i2c_rd8 val %d\n",val);
+
+	return val;
 }
 
 static void i2c_wr8(struct v4l2_subdev *sd, u16 reg, u8 val)
 {
-	i2c_wrreg(sd, reg, val, 1);
+	i2c_wr(sd, reg, &val, 1);
 }
 
-static void i2c_wr8_and_or(struct v4l2_subdev *sd, u16 reg,
-		u8 mask, u8 val)
+static void i2c_wr8_and_or(struct v4l2_subdev *sd, u16 reg,	u8 mask, u8 val)
 {
-	i2c_wrreg(sd, reg, (i2c_rdreg(sd, reg, 1) & mask) | val, 1);
+	i2c_wr8(sd, reg, (i2c_rd8(sd, reg) & mask) | val);
 }
 
 static u16 i2c_rd16(struct v4l2_subdev *sd, u16 reg)
 {
-	return i2c_rdreg(sd, reg, 2);
+	u16 val;
+	int ret;
+	//v4l2_info(sd, "Reading i2c_rd16\n");
+
+	ret = i2c_rd(sd, reg, (u8 *)&val, 2);
+	//v4l2_info(sd, "RET %d\n", ret);
+
+	if (ret == -1) {
+		v4l2_info(sd, "Reading i2c_rd16 failed %d and ret ==99 now !\n", ret);
+		// Read failed
+		return 99;  // TODO. Make this better!
+	}
+	
+	return val;
 }
 
 static void i2c_wr16(struct v4l2_subdev *sd, u16 reg, u16 val)
 {
-	i2c_wrreg(sd, reg, val, 2);
+	i2c_wr(sd, reg, (u8 *)&val, 2);
 }
 
 static void i2c_wr16_and_or(struct v4l2_subdev *sd, u16 reg, u16 mask, u16 val)
 {
-	i2c_wrreg(sd, reg, (i2c_rdreg(sd, reg, 1) & mask) | val, 1);
+	i2c_wr16(sd, reg, (i2c_rd16(sd, reg) & mask) | val);
 }
 
 static u32 i2c_rd32(struct v4l2_subdev *sd, u16 reg)
 {
-	return i2c_rdreg(sd, reg, 4);
+	u32 val;
+
+	i2c_rd(sd, reg, (u8 *)&val, 4);
+
+	return val;
 }
 
 static void i2c_wr32(struct v4l2_subdev *sd, u16 reg, u32 val)
 {
-	i2c_wrreg(sd, reg, val, 4);
+	i2c_wr(sd, reg, (u8 *)&val, 4);
 }
 
 /* --------------- STATUS --------------- */
@@ -308,7 +396,7 @@ static inline unsigned fps(const struct v4l2_bt_timings *t)
 }
 
 static int tc358743_get_detected_timings(struct v4l2_subdev *sd,
-				     struct v4l2_dv_timings *timings)
+				                         struct v4l2_dv_timings *timings)
 {
 	struct v4l2_bt_timings *bt = &timings->bt;
 	unsigned width, height, frame_width, frame_height, frame_interval, fps;
@@ -316,11 +404,11 @@ static int tc358743_get_detected_timings(struct v4l2_subdev *sd,
 	memset(timings, 0, sizeof(struct v4l2_dv_timings));
 
 	if (no_signal(sd)) {
-		v4l2_dbg(1, debug, sd, "%s: no valid signal\n", __func__);
+		v4l2_info(sd, "%s: no valid signal\n", __func__);
 		return -ENOLINK;
 	}
 	if (no_sync(sd)) {
-		v4l2_dbg(1, debug, sd, "%s: no sync on signal\n", __func__);
+		v4l2_info(sd, "%s: no sync on signal\n", __func__);
 		return -ENOLCK;
 	}
 
@@ -353,10 +441,12 @@ static int tc358743_get_detected_timings(struct v4l2_subdev *sd,
 		bt->il_vsync = bt->vsync + 1;
 		bt->pixelclock /= 2;
 	}
-
+	v4l2_info(sd,"%d:%s: width %d height %d interlaced %d\n",__LINE__,__FUNCTION__,		
+	        bt->width,		
+	        bt->height,		
+	        bt->interlaced);
 	return 0;
 }
-
 /* --------------- HOTPLUG / HDCP / EDID --------------- */
 
 static void tc358743_delayed_work_enable_hotplug(struct work_struct *work)
@@ -366,14 +456,13 @@ static void tc358743_delayed_work_enable_hotplug(struct work_struct *work)
 			struct tc358743_state, delayed_work_enable_hotplug);
 	struct v4l2_subdev *sd = &state->sd;
 
-	v4l2_dbg(2, debug, sd, "%s:\n", __func__);
-
+	v4l2_info(sd, "%s:\n", __func__);
 	i2c_wr8_and_or(sd, HPD_CTL, ~MASK_HPD_OUT0, MASK_HPD_OUT0);
 }
 
 static void tc358743_set_hdmi_hdcp(struct v4l2_subdev *sd, bool enable)
 {
-	v4l2_dbg(2, debug, sd, "%s: %s\n", __func__, enable ?
+	v4l2_info(sd, "%s: %s\n", __func__, enable ?
 				"enable" : "disable");
 
 	i2c_wr8_and_or(sd, HDCP_REG1,
@@ -405,7 +494,7 @@ static void tc358743_disable_edid(struct v4l2_subdev *sd)
 {
 	struct tc358743_state *state = to_state(sd);
 
-	v4l2_dbg(2, debug, sd, "%s:\n", __func__);
+	v4l2_info(sd, "%s:\n", __func__);
 
 	cancel_delayed_work_sync(&state->delayed_work_enable_hotplug);
 
@@ -419,7 +508,7 @@ static void tc358743_enable_edid(struct v4l2_subdev *sd)
 	struct tc358743_state *state = to_state(sd);
 
 	if (state->edid_blocks_written == 0) {
-		v4l2_dbg(2, debug, sd, "%s: no EDID -> no hotplug\n", __func__);
+		v4l2_info(sd, "%s: no EDID -> no hotplug\n", __func__);
 		return;
 	}
 
@@ -427,10 +516,31 @@ static void tc358743_enable_edid(struct v4l2_subdev *sd)
 
 	/* Enable hotplug after 100 ms. DDC access to EDID is also enabled when
 	 * hotplug is enabled. See register DDC_CTL */
-	schedule_delayed_work(&state->delayed_work_enable_hotplug, HZ / 10);
+	queue_delayed_work(state->work_queues,
+		&state->delayed_work_enable_hotplug, HZ / 10);
 
 	tc358743_enable_interrupts(sd, true);
 	tc358743_s_ctrl_detect_tx_5v(sd);
+}
+
+static void tc358743_delayed_work_enable_interrupt(struct work_struct *work)
+{
+	struct delayed_work *dwork = to_delayed_work(work);
+	struct tc358743_state *state = container_of(dwork,
+		struct tc358743_state, delayed_work_enable_interrupt);
+	struct v4l2_subdev *sd = &state->sd;
+
+	struct v4l2_subdev_edid sd_edid = {
+		.blocks = 2,
+		.edid = edid,
+	};
+
+	v4l2_dbg(2, debug, sd, "%s:\n", __func__);
+
+	tc358743_enable_interrupts(sd, tx_5v_power_present(sd));
+
+	/* Temporary EDID. Should be set by userspace */
+	tc358743_s_edid(sd, &sd_edid);
 }
 
 static void tc358743_erase_bksv(struct v4l2_subdev *sd)
@@ -501,12 +611,134 @@ static int tc358743_update_controls(struct v4l2_subdev *sd)
 
 	return ret;
 }
+static unsigned tc358743_num_csi_lanes_needed(struct v4l2_subdev *sd)
+{
+	struct tc358743_state *state = to_state(sd);
+	struct v4l2_bt_timings *bt = &state->timings.bt;
+	struct tc358743_platform_data *pdata = &state->pdata;
+	u32 bits_pr_pixel =
+		(state->mbus_fmt_code == MEDIA_BUS_FMT_UYVY8_1X16) ?  16 : 24;
+	u32 bps = bt->width * bt->height * fps(bt) * bits_pr_pixel;
+	u32 bps_pr_lane = (pdata->refclk_hz / pdata->pll_prd) * pdata->pll_fbd;
+
+	return DIV_ROUND_UP(bps, bps_pr_lane);
+}
+static int tc358743_get_edid(struct v4l2_subdev *sd){
+	//static int i2c_rd(struct v4l2_subdev *sd, u16 reg, u8 *values, u32 n)
+	//int i = 0;
+	u8 edid_read[256];
+	int result = 0;
+	u32 n = sizeof(edid_read);
+
+	result = i2c_rd(sd,EDID_RAM,edid_read,n);
+	v4l2_info(sd, "%s i2c_rd return %d\r\n",__func__,result);
+	// for(i = 0; i< n;i++)
+	// 	printk("%02x ",edid_read[i]);
+	v4l2_info(sd, "%s done\r\n",__func__);
+	return 0;
+}
+static int tc358743_log_status(struct v4l2_subdev *sd)
+{
+	struct tc358743_state *state = to_state(sd);
+	struct v4l2_dv_timings timings;
+	uint8_t hdmi_sys_status =  i2c_rd8(sd, SYS_STATUS);
+	uint16_t sysctl = i2c_rd16(sd, SYSCTL);
+	u8 vi_status3 =  i2c_rd8(sd, VI_STATUS3);
+	const int deep_color_mode[4] = { 8, 10, 12, 16 };
+	static const char * const input_color_space[] = {
+		"RGB", "YCbCr 601", "Adobe RGB", "YCbCr 709", "NA (4)",
+		"xvYCC 601", "NA(6)", "xvYCC 709", "NA(8)", "sYCC601",
+		"NA(10)", "NA(11)", "NA(12)", "Adobe YCC 601"};
+
+	tc358743_get_edid(sd);
+	v4l2_info(sd, "-----Chip status-----\n");
+	v4l2_info(sd, "Chip ID:0x%02x\n",
+			(i2c_rd16(sd, CHIPID) & MASK_CHIPID) >> 8);
+	v4l2_info(sd, "Chip revision:0x%02x\n",
+			i2c_rd16(sd, CHIPID) & MASK_REVID);
+	v4l2_info(sd, "Reset: IR: %d, CEC: %d, CSI TX: %d, HDMI: %d\n",
+			!!(sysctl & MASK_IRRST),
+			!!(sysctl & MASK_CECRST),
+			!!(sysctl & MASK_CTXRST),
+			!!(sysctl & MASK_HDMIRST));
+	v4l2_info(sd, "Sleep mode: %s\n", sysctl & MASK_SLEEP ? "on" : "off");
+	v4l2_info(sd, "Cable detected (+5V power): %s\n",
+			hdmi_sys_status & MASK_S_DDC5V ? "yes" : "no");
+	v4l2_info(sd, "DDC lines enabled: %s\n",
+			(i2c_rd8(sd, EDID_MODE) & MASK_EDID_MODE_E_DDC) ?
+			"yes" : "no");
+	v4l2_info(sd, "Hotplug enabled: %s\n",
+			(i2c_rd8(sd, HPD_CTL) & MASK_HPD_OUT0) ?
+			"yes" : "no");
+	v4l2_info(sd, "Hotplug ctl: %s\n",
+			(i2c_rd8(sd, HPD_CTL) & MASK_HPD_CTL0) ?
+			"yes" : "no");
+	v4l2_info(sd, "CEC enabled: %s\n",
+			(i2c_rd16(sd, CECEN) & MASK_CECEN) ?  "yes" : "no");
+	v4l2_info(sd, "-----Signal status-----\n");
+	v4l2_info(sd, "TMDS signal detected: %s\n",
+			hdmi_sys_status & MASK_S_TMDS ? "yes" : "no");
+	v4l2_info(sd, "Stable sync signal: %s\n",
+			hdmi_sys_status & MASK_S_SYNC ? "yes" : "no");
+	v4l2_info(sd, "PHY PLL locked: %s\n",
+			hdmi_sys_status & MASK_S_PHY_PLL ? "yes" : "no");
+	v4l2_info(sd, "PHY DE detected: %s\n",
+			hdmi_sys_status & MASK_S_PHY_SCDT ? "yes" : "no");
+
+	if (tc358743_get_detected_timings(sd, &timings)) {
+		v4l2_info(sd, "No video detected\n");
+	} else {
+		v4l2_print_dv_timings(sd->name, "Detected format: ", &timings, true);
+	}
+	
+	v4l2_print_dv_timings(sd->name, "Configured format: ", &state->timings, true);
+
+	v4l2_info(sd, "-----CSI-TX status-----\n");
+	v4l2_info(sd, "Lanes needed: %d\n",
+			tc358743_num_csi_lanes_needed(sd));
+	v4l2_info(sd, "Lanes in use: %d\n",
+			tc358743_num_csi_lanes_in_use(sd));
+	v4l2_info(sd, "Waiting for particular sync signal: %s\n",
+			(i2c_rd16(sd, CSI_STATUS) & MASK_S_WSYNC) ?
+			"yes" : "no");
+	v4l2_info(sd, "Transmit mode: %s\n",
+			(i2c_rd16(sd, CSI_STATUS) & MASK_S_TXACT) ?
+			"yes" : "no");//add register MASK_S_TXACT 
+	v4l2_info(sd, "Receive mode: %s\n",
+			(i2c_rd16(sd, CSI_STATUS) & MASK_S_RXACT) ?
+			"yes" : "no");
+	v4l2_info(sd, "Stopped: %s\n",
+			(i2c_rd16(sd, CSI_STATUS) & MASK_S_HLT) ?
+			"yes" : "no");
+	v4l2_info(sd, "Color space: %s\n",
+			state->mbus_fmt_code == MEDIA_BUS_FMT_UYVY8_1X16 ?
+			"YCbCr 422 16-bit" :
+			state->mbus_fmt_code == MEDIA_BUS_FMT_RGB888_1X24 ?
+			"RGB 888 24-bit" : "Unsupported");
+
+	v4l2_info(sd, "-----%s status-----\n", is_hdmi(sd) ? "HDMI" : "DVI-D");
+	v4l2_info(sd, "HDCP encrypted content: %s\n",
+			hdmi_sys_status & MASK_S_HDCP ? "yes" : "no");
+	v4l2_info(sd, "Input color space: %s %s range\n",
+			input_color_space[(vi_status3 & MASK_S_V_COLOR) >> 1],
+			(vi_status3 & MASK_LIMITED) ? "limited" : "full");
+	if (!is_hdmi(sd))
+		return 0;
+	v4l2_info(sd, "AV Mute: %s\n", hdmi_sys_status & MASK_S_AVMUTE ? "on" :
+			"off");
+	v4l2_info(sd, "Deep color mode: %d-bits per channel\n",
+			deep_color_mode[(i2c_rd8(sd, VI_STATUS1) &
+				MASK_S_DEEPCOLOR) >> 2]);
+	print_avi_infoframe(sd);
+
+	return 0;
+}
 
 /* --------------- INIT --------------- */
 
 static void tc358743_reset_phy(struct v4l2_subdev *sd)
 {
-	v4l2_dbg(1, debug, sd, "%s:\n", __func__);
+	v4l2_info(sd, "%s:\n", __func__);
 
 	i2c_wr8_and_or(sd, PHY_RST, ~MASK_RESET_CTRL, 0);
 	i2c_wr8_and_or(sd, PHY_RST, ~MASK_RESET_CTRL, MASK_RESET_CTRL);
@@ -522,16 +754,17 @@ static void tc358743_reset(struct v4l2_subdev *sd, uint16_t mask)
 
 static inline void tc358743_sleep_mode(struct v4l2_subdev *sd, bool enable)
 {
-	i2c_wr16_and_or(sd, SYSCTL, ~MASK_SLEEP,
-			enable ? MASK_SLEEP : 0);
+	i2c_wr16_and_or(sd, SYSCTL, ~MASK_SLEEP, enable ? MASK_SLEEP : 0);
 }
 
 static inline void enable_stream(struct v4l2_subdev *sd, bool enable)
 {
 	struct tc358743_state *state = to_state(sd);
 
-	v4l2_dbg(3, debug, sd, "%s: %sable\n",
-			__func__, enable ? "en" : "dis");
+	v4l2_info(sd, "%s: %sable\n",	__func__, enable ? "en" : "dis");
+
+	if (enable == state->enabled)
+		return;
 
 	if (enable) {
 		/* It is critical for CSI receiver to see lane transition
@@ -548,10 +781,13 @@ static inline void enable_stream(struct v4l2_subdev *sd, bool enable)
 		i2c_wr8(sd, VI_MUTE, MASK_AUTO_MUTE | MASK_VI_MUTE);
 	}
 
-	mutex_lock(&state->confctl_mutex);
 	i2c_wr16_and_or(sd, CONFCTL, ~(MASK_VBUFEN | MASK_ABUFEN),
-			enable ? (MASK_VBUFEN | MASK_ABUFEN) : 0x0);
-	mutex_unlock(&state->confctl_mutex);
+			enable ? (MASK_VBUFEN | MASK_ABUFEN) :0x0);
+	v4l2_info(sd,"%d:%s: end\n",__LINE__,__FUNCTION__);		
+	if (enable)	{		
+        tc358743_log_status(sd);		
+    }
+	state->enabled = enable;
 }
 
 static void tc358743_set_pll(struct v4l2_subdev *sd)
@@ -564,7 +800,7 @@ static void tc358743_set_pll(struct v4l2_subdev *sd)
 		SET_PLL_FBD(pdata->pll_fbd);
 	u32 hsck = (pdata->refclk_hz / pdata->pll_prd) * pdata->pll_fbd;
 
-	v4l2_dbg(2, debug, sd, "%s:\n", __func__);
+	v4l2_info(sd, "%s:\n", __func__);
 
 	/* Only rewrite when needed (new value or disabled), since rewriting
 	 * triggers another format change event. */
@@ -572,15 +808,14 @@ static void tc358743_set_pll(struct v4l2_subdev *sd)
 		u16 pll_frs;
 
 		if (hsck > 500000000)
-			pll_frs = 0x0;
+			pll_frs =0x0;
 		else if (hsck > 250000000)
-			pll_frs = 0x1;
+			pll_frs =0x1;
 		else if (hsck > 125000000)
-			pll_frs = 0x2;
+			pll_frs =0x2;
 		else
-			pll_frs = 0x3;
-
-		v4l2_dbg(1, debug, sd, "%s: updating PLL clock\n", __func__);
+			pll_frs =0x3;
+		v4l2_info(sd, "%s: updating PLL clock\n", __func__);
 		tc358743_sleep_mode(sd, true);
 		i2c_wr16(sd, PLLCTL0, pllctl0_new);
 		i2c_wr16_and_or(sd, PLLCTL1,
@@ -602,17 +837,12 @@ static void tc358743_set_ref_clk(struct v4l2_subdev *sd)
 	u16 fh_min;
 	u16 fh_max;
 
-	BUG_ON(!(pdata->refclk_hz == 26000000 ||
-		 pdata->refclk_hz == 27000000 ||
-		 pdata->refclk_hz == 42000000));
-
 	sys_freq = pdata->refclk_hz / 10000;
 	i2c_wr8(sd, SYS_FREQ0, sys_freq & 0x00ff);
 	i2c_wr8(sd, SYS_FREQ1, (sys_freq & 0xff00) >> 8);
 
 	i2c_wr8_and_or(sd, PHY_CTL0, ~MASK_PHY_SYSCLK_IND,
-			(pdata->refclk_hz == 42000000) ?
-			MASK_PHY_SYSCLK_IND : 0x0);
+			(pdata->refclk_hz == 42000000) ? MASK_PHY_SYSCLK_IND :0x0);
 
 	fh_min = pdata->refclk_hz / 100000;
 	i2c_wr8(sd, FH_MIN0, fh_min & 0x00ff);
@@ -628,56 +858,40 @@ static void tc358743_set_ref_clk(struct v4l2_subdev *sd)
 	i2c_wr8(sd, LOCKDET_REF2, (lockdet_ref & 0x0f0000) >> 16);
 
 	i2c_wr8_and_or(sd, NCO_F0_MOD, ~MASK_NCO_F0_MOD,
-			(pdata->refclk_hz == 27000000) ?
-			MASK_NCO_F0_MOD_27MHZ : 0x0);
+			(pdata->refclk_hz == 27000000) ? MASK_NCO_F0_MOD_27MHZ :0x0);
 }
-
 static void tc358743_set_csi_color_space(struct v4l2_subdev *sd)
 {
 	struct tc358743_state *state = to_state(sd);
 
 	switch (state->mbus_fmt_code) {
-	case MEDIA_BUS_FMT_UYVY8_1X16:
-		v4l2_dbg(2, debug, sd, "%s: YCbCr 422 16-bit\n", __func__);
-		i2c_wr8_and_or(sd, VOUT_SET2,
-				~(MASK_SEL422 | MASK_VOUT_422FIL_100) & 0xff,
-				MASK_SEL422 | MASK_VOUT_422FIL_100);
-		i2c_wr8_and_or(sd, VI_REP, ~MASK_VOUT_COLOR_SEL & 0xff,
-				MASK_VOUT_COLOR_601_YCBCR_LIMITED);
-		mutex_lock(&state->confctl_mutex);
-		i2c_wr16_and_or(sd, CONFCTL, ~MASK_YCBCRFMT,
-				MASK_YCBCRFMT_422_8_BIT);
-		mutex_unlock(&state->confctl_mutex);
-		break;
-	case MEDIA_BUS_FMT_RGB888_1X24:
-		v4l2_dbg(2, debug, sd, "%s: RGB 888 24-bit\n", __func__);
-		i2c_wr8_and_or(sd, VOUT_SET2,
-				~(MASK_SEL422 | MASK_VOUT_422FIL_100) & 0xff,
-				0x00);
-		i2c_wr8_and_or(sd, VI_REP, ~MASK_VOUT_COLOR_SEL & 0xff,
-				MASK_VOUT_COLOR_RGB_FULL);
-		mutex_lock(&state->confctl_mutex);
-		i2c_wr16_and_or(sd, CONFCTL, ~MASK_YCBCRFMT, 0);
-		mutex_unlock(&state->confctl_mutex);
-		break;
-	default:
-		v4l2_dbg(2, debug, sd, "%s: Unsupported format code 0x%x\n",
+		case MEDIA_BUS_FMT_UYVY8_1X16:
+			v4l2_info(sd, "%s: YCbCr 422 16-bit\n", __func__);
+			i2c_wr8_and_or(sd, VOUT_SET2,
+					~(MASK_SEL422 | MASK_VOUT_422FIL_100) & 0xff,
+					MASK_SEL422 | MASK_VOUT_422FIL_100);
+			i2c_wr8_and_or(sd, VI_REP, ~MASK_VOUT_COLOR_SEL & 0xff,
+					MASK_VOUT_COLOR_601_YCBCR_LIMITED);
+			i2c_wr16_and_or(sd, CONFCTL, ~MASK_YCBCRFMT,
+					MASK_YCBCRFMT_422_8_BIT);
+			break;
+		// case MEDIA_BUS_FMT_RGB888_1X24:
+		// 	v4l2_info(sd, "%s: RGB 888 24-bit\n", __func__);
+		// 	i2c_wr8_and_or(sd, VOUT_SET2,
+		// 			~(MASK_SEL422 | MASK_VOUT_422FIL_100) & 0xff,
+		// 			0x00);
+		// 	i2c_wr8_and_or(sd, VI_REP, ~MASK_VOUT_COLOR_SEL & 0xff,
+		// 			MASK_VOUT_COLOR_RGB_FULL);
+		// 	i2c_wr16_and_or(sd, CONFCTL, ~MASK_YCBCRFMT, 0);
+		// 	break;
+		default:
+			v4l2_dbg(2, debug, sd, "%s: Unsupported format code 0x%x\n",
 				__func__, state->mbus_fmt_code);
+			break;
 	}
 }
 
-static unsigned tc358743_num_csi_lanes_needed(struct v4l2_subdev *sd)
-{
-	struct tc358743_state *state = to_state(sd);
-	struct v4l2_bt_timings *bt = &state->timings.bt;
-	struct tc358743_platform_data *pdata = &state->pdata;
-	u32 bits_pr_pixel =
-		(state->mbus_fmt_code == MEDIA_BUS_FMT_UYVY8_1X16) ?  16 : 24;
-	u32 bps = bt->width * bt->height * fps(bt) * bits_pr_pixel;
-	u32 bps_pr_lane = (pdata->refclk_hz / pdata->pll_prd) * pdata->pll_fbd;
 
-	return DIV_ROUND_UP(bps, bps_pr_lane);
-}
 
 static void tc358743_set_csi(struct v4l2_subdev *sd)
 {
@@ -685,7 +899,7 @@ static void tc358743_set_csi(struct v4l2_subdev *sd)
 	struct tc358743_platform_data *pdata = &state->pdata;
 	unsigned lanes = tc358743_num_csi_lanes_needed(sd);
 
-	v4l2_dbg(3, debug, sd, "%s:\n", __func__);
+	v4l2_info(sd, "%s:\n", __func__);
 
 	tc358743_reset(sd, MASK_CTXRST);
 
@@ -711,13 +925,13 @@ static void tc358743_set_csi(struct v4l2_subdev *sd)
 	i2c_wr32(sd, HSTXVREGCNT, pdata->hstxvregcnt);
 
 	i2c_wr32(sd, HSTXVREGEN,
-			((lanes > 0) ? MASK_CLM_HSTXVREGEN : 0x0) |
-			((lanes > 0) ? MASK_D0M_HSTXVREGEN : 0x0) |
-			((lanes > 1) ? MASK_D1M_HSTXVREGEN : 0x0) |
-			((lanes > 2) ? MASK_D2M_HSTXVREGEN : 0x0) |
-			((lanes > 3) ? MASK_D3M_HSTXVREGEN : 0x0));
+			((lanes > 0) ? MASK_CLM_HSTXVREGEN :0x0) |
+			((lanes > 0) ? MASK_D0M_HSTXVREGEN :0x0) |
+			((lanes > 1) ? MASK_D1M_HSTXVREGEN :0x0) |
+			((lanes > 2) ? MASK_D2M_HSTXVREGEN :0x0) |
+			((lanes > 3) ? MASK_D3M_HSTXVREGEN :0x0));
 
-	i2c_wr32(sd, TXOPTIONCNTRL, (state->bus.flags &
+	i2c_wr32(sd, TXOPTIONCNTRL, (pdata->endpoint.bus.mipi_csi2.flags &
 		 V4L2_MBUS_CSI2_CONTINUOUS_CLOCK) ? MASK_CONTCLKMODE : 0);
 	i2c_wr32(sd, STARTCNTRL, MASK_START);
 	i2c_wr32(sd, CSI_START, MASK_STRT);
@@ -748,7 +962,8 @@ static void tc358743_set_hdmi_phy(struct v4l2_subdev *sd)
 
 	/* Default settings from REF_02, sheet "Source HDMI"
 	 * and custom settings as platform data */
-	i2c_wr8_and_or(sd, PHY_EN, ~MASK_ENABLE_PHY, 0x0);
+	// turn of physics
+	i2c_wr8_and_or(sd, PHY_EN, ~MASK_ENABLE_PHY,0x0);
 	i2c_wr8(sd, PHY_CTL1, SET_PHY_AUTO_RST1_US(1600) |
 			SET_FREQ_RANGE_MODE_CYCLES(1));
 	i2c_wr8_and_or(sd, PHY_CTL2, ~MASK_PHY_AUTO_RSTn,
@@ -758,22 +973,33 @@ static void tc358743_set_hdmi_phy(struct v4l2_subdev *sd)
 			 MASK_PHY_AUTO_RST3 : 0) |
 			(pdata->hdmi_phy_auto_reset_tmds_valid ?
 			 MASK_PHY_AUTO_RST4 : 0));
-	i2c_wr8(sd, PHY_BIAS, 0x40);
+	i2c_wr8(sd, PHY_BIAS,0x40);
 	i2c_wr8(sd, PHY_CSQ, SET_CSQ_CNT_LEVEL(0x0a));
 	i2c_wr8(sd, AVM_CTL, 45);
 	i2c_wr8_and_or(sd, HDMI_DET, ~MASK_HDMI_DET_V,
 			pdata->hdmi_detection_delay << 4);
+
 	i2c_wr8_and_or(sd, HV_RST, ~(MASK_H_PI_RST | MASK_V_PI_RST),
 			(pdata->hdmi_phy_auto_reset_hsync_out_of_range ?
 			 MASK_H_PI_RST : 0) |
 			(pdata->hdmi_phy_auto_reset_vsync_out_of_range ?
 			 MASK_V_PI_RST : 0));
+	// turn on physics
 	i2c_wr8_and_or(sd, PHY_EN, ~MASK_ENABLE_PHY, MASK_ENABLE_PHY);
 }
 
+static void tc358743_force_audio_hack(struct v4l2_subdev *sd)
+{
+	
+	v4l2_info(sd, "%s IN PROGRESS", __FUNCTION__);
+	// DVI->HDMI change
+	i2c_wr8(sd, ANA_CTL, MASK_APPL_PCSX_NORMAL | MASK_ANALOG_ON);
+
+}
+
+
 static void tc358743_set_hdmi_audio(struct v4l2_subdev *sd)
 {
-	struct tc358743_state *state = to_state(sd);
 
 	/* Default settings from REF_02, sheet "Source HDMI" */
 	i2c_wr8(sd, FORCE_MUTE, 0x00);
@@ -789,12 +1015,11 @@ static void tc358743_set_hdmi_audio(struct v4l2_subdev *sd)
 	i2c_wr8(sd, ACR_MDF0, MASK_ACR_L2MDF_1976_PPM | MASK_ACR_L1MDF_976_PPM);
 	i2c_wr8(sd, ACR_MDF1, MASK_ACR_L3MDF_3906_PPM);
 	i2c_wr8(sd, SDO_MODE1, MASK_SDO_FMT_I2S);
+
 	i2c_wr8(sd, DIV_MODE, SET_DIV_DLY_MS(100));
 
-	mutex_lock(&state->confctl_mutex);
 	i2c_wr16_and_or(sd, CONFCTL, 0xffff, MASK_AUDCHNUM_2 |
 			MASK_AUDOUTSEL_I2S | MASK_AUTOINDEX);
-	mutex_unlock(&state->confctl_mutex);
 }
 
 static void tc358743_set_hdmi_info_frame_mode(struct v4l2_subdev *sd)
@@ -816,19 +1041,22 @@ static void tc358743_initial_setup(struct v4l2_subdev *sd)
 	struct tc358743_state *state = to_state(sd);
 	struct tc358743_platform_data *pdata = &state->pdata;
 
+	v4l2_dbg(3, debug, sd, "%s():\n", __func__);
+
 	/* CEC and IR are not supported by this driver */
 	i2c_wr16_and_or(sd, SYSCTL, ~(MASK_CECRST | MASK_IRRST),
 			(MASK_CECRST | MASK_IRRST));
 
 	tc358743_reset(sd, MASK_CTXRST | MASK_HDMIRST);
+	tc358743_init_interrupts(sd);
 	tc358743_sleep_mode(sd, false);
 
 	i2c_wr16(sd, FIFOCTL, pdata->fifo_level);
 
 	tc358743_set_ref_clk(sd);
 
-	i2c_wr8_and_or(sd, DDC_CTL, ~MASK_DDC5V_MODE,
-			pdata->ddc5v_delay & MASK_DDC5V_MODE);
+	i2c_wr8_and_or(sd, DDC_CTL, ~MASK_DDC5V_MODE, 
+	               pdata->ddc5v_delay & MASK_DDC5V_MODE);
 	i2c_wr8_and_or(sd, EDID_MODE, ~MASK_EDID_MODE, MASK_EDID_MODE_E_DDC);
 
 	tc358743_set_hdmi_phy(sd);
@@ -855,17 +1083,17 @@ static void tc358743_format_change(struct v4l2_subdev *sd)
 		.u.src_change.changes = V4L2_EVENT_SRC_CH_RESOLUTION,
 	};
 
+	v4l2_info(sd, "%s: Format changed\n", __func__);
+
 	if (tc358743_get_detected_timings(sd, &timings)) {
 		enable_stream(sd, false);
 
-		v4l2_dbg(1, debug, sd, "%s: No signal\n",
-				__func__);
+		v4l2_info(sd, "%s: Format changed. No signal\n", __func__);
 	} else {
 		if (!v4l2_match_dv_timings(&state->timings, &timings, 0, false))
 			enable_stream(sd, false);
 
-		if (debug)
-			v4l2_print_dv_timings(sd->name,
+		v4l2_print_dv_timings(sd->name,
 					"tc358743_format_change: New format: ",
 					&timings, false);
 	}
@@ -882,7 +1110,11 @@ static void tc358743_init_interrupts(struct v4l2_subdev *sd)
 	for (i = SYS_INT; i <= KEY_INT; i++)
 		i2c_wr8(sd, i, 0xff);
 
-	i2c_wr16(sd, INTSTATUS, 0xffff);
+	/* Clear and disable all interrupts */
+	i2c_wr16(sd, INTSTATUS, MASK_INT_STATUS_MASK_ALL);
+	i2c_wr16(sd, INTSTATUS, 0x0);
+
+	i2c_wr16(sd, INTMASK, MASK_INT_STATUS_MASK_ALL);
 }
 
 static void tc358743_enable_interrupts(struct v4l2_subdev *sd,
@@ -937,7 +1169,7 @@ static void tc358743_hdmi_misc_int_handler(struct v4l2_subdev *sd,
 
 	i2c_wr8(sd, MISC_INT, misc_int);
 
-	v4l2_dbg(3, debug, sd, "%s: MISC_INT = 0x%02x\n", __func__, misc_int);
+	v4l2_info(sd, "%s: MISC_INT =0x%02x\n", __func__, misc_int);
 
 	if (misc_int & MASK_I_SYNC_CHG) {
 		/* Reset the HDMI PHY to try to trigger proper lock on the
@@ -969,12 +1201,12 @@ static void tc358743_hdmi_cbit_int_handler(struct v4l2_subdev *sd,
 
 	i2c_wr8(sd, CBIT_INT, cbit_int);
 
-	v4l2_dbg(3, debug, sd, "%s: CBIT_INT = 0x%02x\n", __func__, cbit_int);
+	v4l2_info(sd, "%s: CBIT_INT =0x%02x\n", __func__, cbit_int);
 
 	if (cbit_int & MASK_I_CBIT_FS) {
 
-		v4l2_dbg(1, debug, sd, "%s: Audio sample rate changed\n",
-				__func__);
+		v4l2_info(sd, "%s: Audio sample rate changed\n",
+						__func__);
 		tc358743_s_ctrl_audio_sampling_rate(sd);
 
 		cbit_int &= ~MASK_I_CBIT_FS;
@@ -984,8 +1216,8 @@ static void tc358743_hdmi_cbit_int_handler(struct v4l2_subdev *sd,
 
 	if (cbit_int & (MASK_I_AF_LOCK | MASK_I_AF_UNLOCK)) {
 
-		v4l2_dbg(1, debug, sd, "%s: Audio present changed\n",
-				__func__);
+		v4l2_info(sd, "%s: Audio present changed\n",
+						__func__);
 		tc358743_s_ctrl_audio_present(sd);
 
 		cbit_int &= ~(MASK_I_AF_LOCK | MASK_I_AF_UNLOCK);
@@ -995,7 +1227,7 @@ static void tc358743_hdmi_cbit_int_handler(struct v4l2_subdev *sd,
 
 	if (cbit_int) {
 		v4l2_err(sd, "%s: Unhandled CBIT_INT interrupts: 0x%02x\n",
-				__func__, cbit_int);
+						__func__, cbit_int);
 	}
 }
 
@@ -1007,11 +1239,11 @@ static void tc358743_hdmi_clk_int_handler(struct v4l2_subdev *sd, bool *handled)
 	/* Bit 7 and bit 6 are set even when they are masked */
 	i2c_wr8(sd, CLK_INT, clk_int | 0x80 | MASK_I_OUT_H_CHG);
 
-	v4l2_dbg(3, debug, sd, "%s: CLK_INT = 0x%02x\n", __func__, clk_int);
+	v4l2_info(sd, "%s: CLK_INT =0x%02x\n", __func__, clk_int);
 
 	if (clk_int & (MASK_I_IN_DE_CHG)) {
 
-		v4l2_dbg(1, debug, sd, "%s: DE size or position has changed\n",
+		v4l2_info(sd, "%s: DE size or position has changed\n",
 				__func__);
 
 		/* If the source switch to a new resolution with the same pixel
@@ -1030,7 +1262,7 @@ static void tc358743_hdmi_clk_int_handler(struct v4l2_subdev *sd, bool *handled)
 
 	if (clk_int) {
 		v4l2_err(sd, "%s: Unhandled CLK_INT interrupts: 0x%02x\n",
-				__func__, clk_int);
+						__func__, clk_int);
 	}
 }
 
@@ -1042,13 +1274,15 @@ static void tc358743_hdmi_sys_int_handler(struct v4l2_subdev *sd, bool *handled)
 
 	i2c_wr8(sd, SYS_INT, sys_int);
 
-	v4l2_dbg(3, debug, sd, "%s: SYS_INT = 0x%02x\n", __func__, sys_int);
+	v4l2_info(sd, "%s: SYS_INT =0x%02x\n", __func__, sys_int);
 
 	if (sys_int & MASK_I_DDC) {
 		bool tx_5v = tx_5v_power_present(sd);
+		// make hpd ctl?
+		//bool tx_5v = true;
 
-		v4l2_dbg(1, debug, sd, "%s: Tx 5V power present: %s\n",
-				__func__, tx_5v ?  "yes" : "no");
+		v4l2_info(sd, "%s: Tx 5V power present: %s\n",
+						__func__, tx_5v ?  "yes" : "no");
 
 		if (tx_5v) {
 			tc358743_enable_edid(sd);
@@ -1066,8 +1300,8 @@ static void tc358743_hdmi_sys_int_handler(struct v4l2_subdev *sd, bool *handled)
 	}
 
 	if (sys_int & MASK_I_DVI) {
-		v4l2_dbg(1, debug, sd, "%s: HDMI->DVI change detected\n",
-				__func__);
+		v4l2_info(sd, "%s: HDMI->DVI change detected\n",
+						__func__);
 
 		/* Reset the HDMI PHY to try to trigger proper lock on the
 		 * incoming video format. Erase BKSV to prevent that old keys
@@ -1083,8 +1317,8 @@ static void tc358743_hdmi_sys_int_handler(struct v4l2_subdev *sd, bool *handled)
 	}
 
 	if (sys_int & MASK_I_HDMI) {
-		v4l2_dbg(1, debug, sd, "%s: DVI->HDMI change detected\n",
-				__func__);
+		v4l2_info(sd, "%s: DVI->HDMI change detected\n",
+						__func__);
 
 		/* Register is reset in DVI mode (REF_01, c. 6.6.41) */
 		i2c_wr8(sd, ANA_CTL, MASK_APPL_PCSX_NORMAL | MASK_ANALOG_ON);
@@ -1096,105 +1330,10 @@ static void tc358743_hdmi_sys_int_handler(struct v4l2_subdev *sd, bool *handled)
 
 	if (sys_int) {
 		v4l2_err(sd, "%s: Unhandled SYS_INT interrupts: 0x%02x\n",
-				__func__, sys_int);
+						__func__, sys_int);
 	}
 }
 
-/* --------------- CORE OPS --------------- */
-
-static int tc358743_log_status(struct v4l2_subdev *sd)
-{
-	struct tc358743_state *state = to_state(sd);
-	struct v4l2_dv_timings timings;
-	uint8_t hdmi_sys_status =  i2c_rd8(sd, SYS_STATUS);
-	uint16_t sysctl = i2c_rd16(sd, SYSCTL);
-	u8 vi_status3 =  i2c_rd8(sd, VI_STATUS3);
-	const int deep_color_mode[4] = { 8, 10, 12, 16 };
-	static const char * const input_color_space[] = {
-		"RGB", "YCbCr 601", "Adobe RGB", "YCbCr 709", "NA (4)",
-		"xvYCC 601", "NA(6)", "xvYCC 709", "NA(8)", "sYCC601",
-		"NA(10)", "NA(11)", "NA(12)", "Adobe YCC 601"};
-
-	v4l2_info(sd, "-----Chip status-----\n");
-	v4l2_info(sd, "Chip ID: 0x%02x\n",
-			(i2c_rd16(sd, CHIPID) & MASK_CHIPID) >> 8);
-	v4l2_info(sd, "Chip revision: 0x%02x\n",
-			i2c_rd16(sd, CHIPID) & MASK_REVID);
-	v4l2_info(sd, "Reset: IR: %d, CEC: %d, CSI TX: %d, HDMI: %d\n",
-			!!(sysctl & MASK_IRRST),
-			!!(sysctl & MASK_CECRST),
-			!!(sysctl & MASK_CTXRST),
-			!!(sysctl & MASK_HDMIRST));
-	v4l2_info(sd, "Sleep mode: %s\n", sysctl & MASK_SLEEP ? "on" : "off");
-	v4l2_info(sd, "Cable detected (+5V power): %s\n",
-			hdmi_sys_status & MASK_S_DDC5V ? "yes" : "no");
-	v4l2_info(sd, "DDC lines enabled: %s\n",
-			(i2c_rd8(sd, EDID_MODE) & MASK_EDID_MODE_E_DDC) ?
-			"yes" : "no");
-	v4l2_info(sd, "Hotplug enabled: %s\n",
-			(i2c_rd8(sd, HPD_CTL) & MASK_HPD_OUT0) ?
-			"yes" : "no");
-	v4l2_info(sd, "CEC enabled: %s\n",
-			(i2c_rd16(sd, CECEN) & MASK_CECEN) ?  "yes" : "no");
-	v4l2_info(sd, "-----Signal status-----\n");
-	v4l2_info(sd, "TMDS signal detected: %s\n",
-			hdmi_sys_status & MASK_S_TMDS ? "yes" : "no");
-	v4l2_info(sd, "Stable sync signal: %s\n",
-			hdmi_sys_status & MASK_S_SYNC ? "yes" : "no");
-	v4l2_info(sd, "PHY PLL locked: %s\n",
-			hdmi_sys_status & MASK_S_PHY_PLL ? "yes" : "no");
-	v4l2_info(sd, "PHY DE detected: %s\n",
-			hdmi_sys_status & MASK_S_PHY_SCDT ? "yes" : "no");
-
-	if (tc358743_get_detected_timings(sd, &timings)) {
-		v4l2_info(sd, "No video detected\n");
-	} else {
-		v4l2_print_dv_timings(sd->name, "Detected format: ", &timings,
-				true);
-	}
-	v4l2_print_dv_timings(sd->name, "Configured format: ", &state->timings,
-			true);
-
-	v4l2_info(sd, "-----CSI-TX status-----\n");
-	v4l2_info(sd, "Lanes needed: %d\n",
-			tc358743_num_csi_lanes_needed(sd));
-	v4l2_info(sd, "Lanes in use: %d\n",
-			tc358743_num_csi_lanes_in_use(sd));
-	v4l2_info(sd, "Waiting for particular sync signal: %s\n",
-			(i2c_rd16(sd, CSI_STATUS) & MASK_S_WSYNC) ?
-			"yes" : "no");
-	v4l2_info(sd, "Transmit mode: %s\n",
-			(i2c_rd16(sd, CSI_STATUS) & MASK_S_TXACT) ?
-			"yes" : "no");
-	v4l2_info(sd, "Receive mode: %s\n",
-			(i2c_rd16(sd, CSI_STATUS) & MASK_S_RXACT) ?
-			"yes" : "no");
-	v4l2_info(sd, "Stopped: %s\n",
-			(i2c_rd16(sd, CSI_STATUS) & MASK_S_HLT) ?
-			"yes" : "no");
-	v4l2_info(sd, "Color space: %s\n",
-			state->mbus_fmt_code == MEDIA_BUS_FMT_UYVY8_1X16 ?
-			"YCbCr 422 16-bit" :
-			state->mbus_fmt_code == MEDIA_BUS_FMT_RGB888_1X24 ?
-			"RGB 888 24-bit" : "Unsupported");
-
-	v4l2_info(sd, "-----%s status-----\n", is_hdmi(sd) ? "HDMI" : "DVI-D");
-	v4l2_info(sd, "HDCP encrypted content: %s\n",
-			hdmi_sys_status & MASK_S_HDCP ? "yes" : "no");
-	v4l2_info(sd, "Input color space: %s %s range\n",
-			input_color_space[(vi_status3 & MASK_S_V_COLOR) >> 1],
-			(vi_status3 & MASK_LIMITED) ? "limited" : "full");
-	if (!is_hdmi(sd))
-		return 0;
-	v4l2_info(sd, "AV Mute: %s\n", hdmi_sys_status & MASK_S_AVMUTE ? "on" :
-			"off");
-	v4l2_info(sd, "Deep color mode: %d-bits per channel\n",
-			deep_color_mode[(i2c_rd8(sd, VI_STATUS1) &
-				MASK_S_DEEPCOLOR) >> 2]);
-	print_avi_infoframe(sd);
-
-	return 0;
-}
 
 #ifdef CONFIG_VIDEO_ADV_DEBUG
 static void tc358743_print_register_map(struct v4l2_subdev *sd)
@@ -1231,7 +1370,7 @@ static int tc358743_get_reg_size(u16 address)
 }
 
 static int tc358743_g_register(struct v4l2_subdev *sd,
-			       struct v4l2_dbg_register *reg)
+			                   struct v4l2_dbg_register *reg)
 {
 	if (reg->reg > 0xffff) {
 		tc358743_print_register_map(sd);
@@ -1240,13 +1379,13 @@ static int tc358743_g_register(struct v4l2_subdev *sd,
 
 	reg->size = tc358743_get_reg_size(reg->reg);
 
-	reg->val = i2c_rdreg(sd, reg->reg, reg->size);
+	i2c_rd(sd, reg->reg, (u8 *)&reg->val, reg->size);
 
 	return 0;
 }
 
 static int tc358743_s_register(struct v4l2_subdev *sd,
-			       const struct v4l2_dbg_register *reg)
+			             const struct v4l2_dbg_register *reg)
 {
 	if (reg->reg > 0xffff) {
 		tc358743_print_register_map(sd);
@@ -1266,8 +1405,8 @@ static int tc358743_s_register(struct v4l2_subdev *sd,
 	    reg->reg == BCAPS)
 		return 0;
 
-	i2c_wrreg(sd, (u16)reg->reg, reg->val,
-			tc358743_get_reg_size(reg->reg));
+	i2c_wr(sd, (u16)reg->reg, (u8 *)&reg->val,
+		   tc358743_get_reg_size(reg->reg));
 
 	return 0;
 }
@@ -1276,12 +1415,20 @@ static int tc358743_s_register(struct v4l2_subdev *sd,
 static int tc358743_isr(struct v4l2_subdev *sd, u32 status, bool *handled)
 {
 	u16 intstatus = i2c_rd16(sd, INTSTATUS);
+	unsigned retry = 10;
 
-	v4l2_dbg(1, debug, sd, "%s: IntStatus = 0x%04x\n", __func__, intstatus);
+	v4l2_info(sd, "%s: IntStatus =0x%04x\n", __func__, intstatus);
 
+	usleep_range(500, 1000);
 	if (intstatus & MASK_HDMI_INT) {
-		u8 hdmi_int0 = i2c_rd8(sd, HDMI_INT0);
-		u8 hdmi_int1 = i2c_rd8(sd, HDMI_INT1);
+		u8 hdmi_int0;
+		u8 hdmi_int1;
+retry:
+		retry--;
+		hdmi_int0 = i2c_rd8(sd, HDMI_INT0);
+		usleep_range(500, 1000);
+		hdmi_int1 = i2c_rd8(sd, HDMI_INT1);
+		usleep_range(500, 1000);
 
 		if (hdmi_int0 & MASK_I_MISC)
 			tc358743_hdmi_misc_int_handler(sd, handled);
@@ -1294,8 +1441,29 @@ static int tc358743_isr(struct v4l2_subdev *sd, u32 status, bool *handled)
 		if (hdmi_int1 & MASK_I_AUD)
 			tc358743_hdmi_audio_int_handler(sd, handled);
 
+		usleep_range(500, 1000);
 		i2c_wr16(sd, INTSTATUS, MASK_HDMI_INT);
 		intstatus &= ~MASK_HDMI_INT;
+		usleep_range(500, 1000);
+		
+		/* Display unhandled HDMI interrupts */
+		hdmi_int0 = i2c_rd8(sd, HDMI_INT0);
+		if (hdmi_int0) {
+			v4l2_dbg(1, debug, sd,
+				"%s: Unhandled HDMI_INT0 interrupts: 0x%02X\n",
+				__func__, hdmi_int0);
+			if (retry)
+				goto retry;
+		}
+		usleep_range(500, 1000);
+		hdmi_int1 = i2c_rd8(sd, HDMI_INT1);
+		if (hdmi_int1) {
+			v4l2_dbg(1, debug, sd,
+				"%s: Unhandled HDMI_INT1 interrupts: 0x%02X\n",
+				__func__, hdmi_int1);
+			if (retry)
+				goto retry;
+		}
 	}
 
 	if (intstatus & MASK_CSI_INT) {
@@ -1310,27 +1478,44 @@ static int tc358743_isr(struct v4l2_subdev *sd, u32 status, bool *handled)
 
 	intstatus = i2c_rd16(sd, INTSTATUS);
 	if (intstatus) {
-		v4l2_dbg(1, debug, sd,
-				"%s: Unhandled IntStatus interrupts: 0x%02x\n",
+		v4l2_info(sd,
+				"%s: Unhandled IntStatus interrupts:0x%02x\n",
 				__func__, intstatus);
 	}
 
 	return 0;
 }
 
+static void tc358743_process_isr(struct work_struct *work)
+{
+	struct tc358743_state *state = container_of(work,
+		struct tc358743_state, process_isr);
+	struct v4l2_subdev *sd = &state->sd;
+	bool handled;
+
+	v4l2_dbg(2, debug, sd, "%s:\n", __func__);
+
+	mutex_lock(&state->isr_lock);
+	tc358743_isr(sd, 0, &handled);
+	mutex_unlock(&state->isr_lock);
+}
+
 static irqreturn_t tc358743_irq_handler(int irq, void *dev_id)
 {
-	struct tc358743_state *state = dev_id;
-	bool handled = false;
+	struct v4l2_subdev *sd = dev_id;
+	struct tc358743_state *state = to_state(sd);
+	v4l2_dbg(3, debug, sd,
+		"%s: IRQ Handler in progress\n", __func__);
 
-	tc358743_isr(&state->sd, 0, &handled);
+	queue_work(state->work_queues, &state->process_isr);
 
-	return handled ? IRQ_HANDLED : IRQ_NONE;
+	return IRQ_HANDLED;
 }
 
 static int tc358743_subscribe_event(struct v4l2_subdev *sd, struct v4l2_fh *fh,
-				    struct v4l2_event_subscription *sub)
+				                    struct v4l2_event_subscription *sub)
 {
+	v4l2_info(sd, "Calling %s\n", __FUNCTION__);
 	switch (sub->type) {
 	case V4L2_EVENT_SOURCE_CHANGE:
 		return v4l2_src_change_event_subdev_subscribe(sd, fh, sub);
@@ -1345,20 +1530,28 @@ static int tc358743_subscribe_event(struct v4l2_subdev *sd, struct v4l2_fh *fh,
 
 static int tc358743_g_input_status(struct v4l2_subdev *sd, u32 *status)
 {
+//	struct tc358743_state *state = to_state(sd);
+//	struct v4l2_dv_timings *timings = &(state->timings);
+	
+	v4l2_info(sd, "Calling %s\n", __FUNCTION__);
 	*status = 0;
 	*status |= no_signal(sd) ? V4L2_IN_ST_NO_SIGNAL : 0;
 	*status |= no_sync(sd) ? V4L2_IN_ST_NO_SYNC : 0;
 
-	v4l2_dbg(1, debug, sd, "%s: status = 0x%x\n", __func__, *status);
+	v4l2_info(sd, "%s: status =0x%x\n", __func__, *status);
+
+//	v4l2_info(sd, "Now getting and setting dv timings");
+//	tc358743_query_dv_timings(sd, timings);
+//	tc358743_s_dv_timings(sd, timings);
 
 	return 0;
 }
 
 static int tc358743_s_dv_timings(struct v4l2_subdev *sd,
-				 struct v4l2_dv_timings *timings)
+				                 struct v4l2_dv_timings *timings)
 {
 	struct tc358743_state *state = to_state(sd);
-
+	v4l2_info(sd, "%s\n",__func__);
 	if (!timings)
 		return -EINVAL;
 
@@ -1367,7 +1560,7 @@ static int tc358743_s_dv_timings(struct v4l2_subdev *sd,
 				timings, false);
 
 	if (v4l2_match_dv_timings(&state->timings, timings, 0, false)) {
-		v4l2_dbg(1, debug, sd, "%s: no change\n", __func__);
+		v4l2_info(sd, "%s: no change\n", __func__);
 		return 0;
 	}
 
@@ -1382,22 +1575,23 @@ static int tc358743_s_dv_timings(struct v4l2_subdev *sd,
 	enable_stream(sd, false);
 	tc358743_set_pll(sd);
 	tc358743_set_csi(sd);
-
+	
 	return 0;
 }
 
 static int tc358743_g_dv_timings(struct v4l2_subdev *sd,
-				 struct v4l2_dv_timings *timings)
+				                 struct v4l2_dv_timings *timings)
 {
 	struct tc358743_state *state = to_state(sd);
+	v4l2_info(sd, "Calling %s\n", __FUNCTION__);
 
 	*timings = state->timings;
-
+	
 	return 0;
 }
 
 static int tc358743_enum_dv_timings(struct v4l2_subdev *sd,
-				    struct v4l2_enum_dv_timings *timings)
+				                    struct v4l2_enum_dv_timings *timings)
 {
 	if (timings->pad != 0)
 		return -EINVAL;
@@ -1407,9 +1601,10 @@ static int tc358743_enum_dv_timings(struct v4l2_subdev *sd,
 }
 
 static int tc358743_query_dv_timings(struct v4l2_subdev *sd,
-		struct v4l2_dv_timings *timings)
+		                             struct v4l2_dv_timings *timings)
 {
 	int ret;
+	v4l2_info(sd, "Calling %s\n", __FUNCTION__);
 
 	ret = tc358743_get_detected_timings(sd, timings);
 	if (ret)
@@ -1428,9 +1623,11 @@ static int tc358743_query_dv_timings(struct v4l2_subdev *sd,
 	return 0;
 }
 
+
 static int tc358743_dv_timings_cap(struct v4l2_subdev *sd,
-		struct v4l2_dv_timings_cap *cap)
+		                           struct v4l2_dv_timings_cap *cap)
 {
+	v4l2_info(sd, "Calling %s\n", __FUNCTION__);
 	if (cap->pad != 0)
 		return -EINVAL;
 
@@ -1440,8 +1637,9 @@ static int tc358743_dv_timings_cap(struct v4l2_subdev *sd,
 }
 
 static int tc358743_g_mbus_config(struct v4l2_subdev *sd,
-			     struct v4l2_mbus_config *cfg)
+			                      struct v4l2_mbus_config *cfg)
 {
+	v4l2_info(sd, "Calling %s\n", __FUNCTION__);
 	cfg->type = V4L2_MBUS_CSI2;
 
 	/* Support for non-continuous CSI-2 clock is missing in the driver */
@@ -1469,19 +1667,22 @@ static int tc358743_g_mbus_config(struct v4l2_subdev *sd,
 
 static int tc358743_s_stream(struct v4l2_subdev *sd, int enable)
 {
+	v4l2_info(sd, "Calling %s\n", __FUNCTION__);
+	/* FIXME: show log status for test */
 	enable_stream(sd, enable);
-
+	
 	return 0;
 }
 
 /* --------------- PAD OPS --------------- */
 
 static int tc358743_get_fmt(struct v4l2_subdev *sd,
-		struct v4l2_subdev_pad_config *cfg,
+		struct v4l2_subdev_pad_config  *cfg,
 		struct v4l2_subdev_format *format)
 {
 	struct tc358743_state *state = to_state(sd);
 	u8 vi_rep = i2c_rd8(sd, VI_REP);
+	v4l2_info(sd, "Calling %s\n", __FUNCTION__);
 
 	if (format->pad != 0)
 		return -EINVAL;
@@ -1498,6 +1699,7 @@ static int tc358743_get_fmt(struct v4l2_subdev *sd,
 		break;
 	case MASK_VOUT_COLOR_601_YCBCR_LIMITED:
 	case MASK_VOUT_COLOR_601_YCBCR_FULL:
+		v4l2_info(sd, "Here 6b, colorspace: %d\n", V4L2_COLORSPACE_SMPTE170M);
 		format->format.colorspace = V4L2_COLORSPACE_SMPTE170M;
 		break;
 	case MASK_VOUT_COLOR_709_YCBCR_FULL:
@@ -1506,20 +1708,28 @@ static int tc358743_get_fmt(struct v4l2_subdev *sd,
 		break;
 	default:
 		format->format.colorspace = 0;
+        v4l2_info(sd,"%d:%s colorspace = 0\n",__LINE__,__FUNCTION__);
 		break;
 	}
 
+	v4l2_info(sd, "get fmt complete\n");
+	v4l2_info(sd, "format %dx%d\n", format->format.width, format->format.height);
+
+	v4l2_info(sd, "fmt_code: %d\n", format->format.code);
+	v4l2_info(sd, "UYVY8 code: %d\n", MEDIA_BUS_FMT_UYVY8_1X16);
 	return 0;
 }
 
 static int tc358743_set_fmt(struct v4l2_subdev *sd,
-		struct v4l2_subdev_pad_config *cfg,
-		struct v4l2_subdev_format *format)
+		                    struct v4l2_subdev_pad_config  *cfg,
+		                    struct v4l2_subdev_format *format)
 {
 	struct tc358743_state *state = to_state(sd);
-
-	u32 code = format->format.code; /* is overwritten by get_fmt */
+	u32 code = format->format.code;
 	int ret = tc358743_get_fmt(sd, cfg, format);
+
+	v4l2_dbg(3, debug, sd, "%s(), ret: %d\n", __func__, ret);
+	v4l2_dbg(3, debug, sd, "Set format code: %d\n", code);
 
 	format->format.code = code;
 
@@ -1527,11 +1737,13 @@ static int tc358743_set_fmt(struct v4l2_subdev *sd,
 		return ret;
 
 	switch (code) {
-	case MEDIA_BUS_FMT_RGB888_1X24:
-	case MEDIA_BUS_FMT_UYVY8_1X16:
-		break;
-	default:
-		return -EINVAL;
+		case MEDIA_BUS_FMT_RGB888_1X24:
+		case MEDIA_BUS_FMT_UYVY8_1X16:
+			v4l2_dbg(3, debug, sd, "Good code %d\n", code);
+			break;
+		default:
+			v4l2_err(sd, "Bad code %d\n", code);
+			return -EINVAL;
 	}
 
 	if (format->which == V4L2_SUBDEV_FORMAT_TRY)
@@ -1543,16 +1755,16 @@ static int tc358743_set_fmt(struct v4l2_subdev *sd,
 	tc358743_set_pll(sd);
 	tc358743_set_csi(sd);
 	tc358743_set_csi_color_space(sd);
-
+	v4l2_info(sd, "Called %s, completed successfully\n", __FUNCTION__);
 	return 0;
 }
 
 static int tc358743_g_edid(struct v4l2_subdev *sd,
-		struct v4l2_subdev_edid *edid)
+		                   struct v4l2_subdev_edid *edid)
 {
 	struct tc358743_state *state = to_state(sd);
-
-	memset(edid->reserved, 0, sizeof(edid->reserved));
+	// int i=0;
+	v4l2_info(sd, "Calling %s\n", __FUNCTION__);
 
 	if (edid->pad != 0)
 		return -EINVAL;
@@ -1574,21 +1786,28 @@ static int tc358743_g_edid(struct v4l2_subdev *sd,
 
 	i2c_rd(sd, EDID_RAM + (edid->start_block * EDID_BLOCK_SIZE), edid->edid,
 			edid->blocks * EDID_BLOCK_SIZE);
-
+	v4l2_info(sd,"EDID_RAM has %d byte from: 0x%04x to 0x%04x \r\n",
+		edid->blocks * EDID_BLOCK_SIZE,
+		EDID_RAM + (edid->start_block * EDID_BLOCK_SIZE),
+		EDID_RAM + (edid->start_block * EDID_BLOCK_SIZE) + 
+		edid->blocks * EDID_BLOCK_SIZE);
+	// for(i=0;i<edid->blocks * EDID_BLOCK_SIZE;i++){
+	// 	printk("%02x ",edid->edid[i]);
+	// }
+	// v4l2_info(sd,"\r\n");
+	v4l2_info(sd, "%s completed successfully", __FUNCTION__);
 	return 0;
 }
 
 static int tc358743_s_edid(struct v4l2_subdev *sd,
-				struct v4l2_subdev_edid *edid)
+				           struct v4l2_subdev_edid *edid)
 {
 	struct tc358743_state *state = to_state(sd);
 	u16 edid_len = edid->blocks * EDID_BLOCK_SIZE;
 	int i;
 
-	v4l2_dbg(2, debug, sd, "%s, pad %d, start block %d, blocks %d\n",
+	v4l2_info(sd, "%s, pad %d, start block %d, blocks %d\n",
 		 __func__, edid->pad, edid->start_block, edid->blocks);
-
-	memset(edid->reserved, 0, sizeof(edid->reserved));
 
 	if (edid->pad != 0)
 		return -EINVAL;
@@ -1613,18 +1832,187 @@ static int tc358743_s_edid(struct v4l2_subdev *sd,
 
 	for (i = 0; i < edid_len; i += EDID_BLOCK_SIZE)
 		i2c_wr(sd, EDID_RAM + i, edid->edid + i, EDID_BLOCK_SIZE);
-
+	
 	state->edid_blocks_written = edid->blocks;
 
 	if (tx_5v_power_present(sd))
 		tc358743_enable_edid(sd);
 
+	v4l2_info(sd, "%s but about to gv_audio_hack", __FUNCTION__);
+	usleep_range(5000, 10000);
+	tc358743_force_audio_hack(sd);
+	tc358743_set_pll(sd);
+//	usleep_range(5000, 10000);
+//	v4l2_info(sd, "%s but about to (maybe) run set_hdmi_audio", __FUNCTION__);
+//	tc358743_set_hdmi_audio(sd);
+	v4l2_info(sd, "%s completed successfully", __FUNCTION__);
 	return 0;
 }
 
-/* -------------------------------------------------------------------------- */
+// static int tc358743_mbus_fmt(struct v4l2_subdev *sd, struct v4l2_mbus_framefmt *mf)
+// {
+// 	struct tc358743_state *state = to_state(sd);
+// 	u8 vi_rep = i2c_rd8(sd, VI_REP);
 
+// 	mf->code = state->mbus_fmt_code;
+// 	mf->width = state->timings.bt.width;
+// 	mf->height = state->timings.bt.height;
+// 	mf->field = V4L2_FIELD_NONE;
+// 	switch (vi_rep & MASK_VOUT_COLOR_SEL) {
+// 		case MASK_VOUT_COLOR_RGB_FULL:
+// 		case MASK_VOUT_COLOR_RGB_LIMITED:
+// 			mf->colorspace = V4L2_COLORSPACE_SRGB;
+// 			break;
+// 		case MASK_VOUT_COLOR_601_YCBCR_LIMITED:
+// 		case MASK_VOUT_COLOR_601_YCBCR_FULL:
+// 			mf->colorspace = V4L2_COLORSPACE_SMPTE170M;
+// 			break;
+// 		case MASK_VOUT_COLOR_709_YCBCR_FULL:
+// 		case MASK_VOUT_COLOR_709_YCBCR_LIMITED:
+// 			mf->colorspace = V4L2_COLORSPACE_REC709;
+// 			break;
+// 		default:
+// 			mf->colorspace = 0;
+// 			break;
+// 	}
+// 	return 0;
+// }
+
+static int tc358743_enum_mbus_code(struct v4l2_subdev *sd,
+				                   struct v4l2_subdev_pad_config  *cfg,
+				                   struct v4l2_subdev_mbus_code_enum *code)
+{
+	v4l2_info(sd, "%s()\n", __func__);
+
+	// if (code->index >= 2) {
+	// 	v4l2_err(sd, "Error in %s\n", __FUNCTION__);
+	// 	v4l2_err(sd, "print code-> %d\n",code->index);///!!!!add code
+	// 	return -EINVAL;
+	// }
+
+	// switch (code->index) {
+	// 	case 0:
+	// 		code->code = MEDIA_BUS_FMT_RGB888_1X24;
+			
+	// 		break;
+	// 	case 1:
+			
+	// 		code->code = MEDIA_BUS_FMT_UYVY8_1X16;
+	// 		break;
+	// 	default:
+	// 		return -EINVAL;
+	// }
+
+    {
+	switch (code->index) {
+	case 0:
+		code->code = MEDIA_BUS_FMT_RGB888_1X24;
+		break;
+	case 1:
+		code->code = MEDIA_BUS_FMT_UYVY8_1X16;
+		break;
+	default:
+		return -EINVAL;
+	}
+	return 0;
+}
+	v4l2_info(sd, "Mbus code found succsefully (%d: %d)", code->index, code->code);
+	
+	return 0;
+}
+
+static int tc358743_enum_frame_size(struct v4l2_subdev *sd,
+				                    struct v4l2_subdev_pad_config  *cfg,                           
+				                    struct v4l2_subdev_frame_size_enum *fse)
+{
+	const struct camera_common_frmfmt *frmfmt = tc358743_frmfmt;
+	int num_frmfmt = ARRAY_SIZE(tc358743_frmfmt);
+
+	v4l2_info(sd, "%s()\n", __func__);
+	v4l2_info(sd, "fse->code %d, index %d\n", fse->code, fse->index);
+	v4l2_info(sd, "----------------------------------------\n");
+
+	// fse->min_width  = fse->max_width  = 1280;
+	// fse->min_height = fse->max_height = 720;
+
+	v4l2_info(sd, "Trying to find frmfmt that matches fse->code, code: %d (UYVY: %d, ARGB32: %d, MEDIA_BUS_FMT_UYVY8_1X16: %d, MEDIA_BUS_FMT_RGB888_1X24: %d)\n", fse->code, V4L2_PIX_FMT_UYVY, V4L2_PIX_FMT_ARGB32, MEDIA_BUS_FMT_UYVY8_1X16, MEDIA_BUS_FMT_RGB888_1X24);
+
+	if (fse->code != MEDIA_BUS_FMT_UYVY8_1X16  && fse->code != MEDIA_BUS_FMT_RGB888_1X24 ) {//add fse->code != MEDIA_BUS_FMT_RGB888_1X24
+		v4l2_err(sd, "Error in %s fse->code, code: %d, UYVY: %d, ARGB32: %d\n", __FUNCTION__, fse->code, V4L2_PIX_FMT_UYVY, V4L2_PIX_FMT_ARGB32);
+		return -EINVAL;
+	}
+
+	v4l2_info(sd, "Code ok");
+
+	if (fse->index >= num_frmfmt) {
+		v4l2_err(sd, "Error in %s, %d outside of num_frmfmt (%d)", __FUNCTION__, fse->index, num_frmfmt);
+		return -EINVAL;
+	}
+	
+	v4l2_info(sd, "Index ok");
+
+	fse->min_width  = fse->max_width  = frmfmt[fse->index].size.width;
+	fse->min_height = fse->max_height = frmfmt[fse->index].size.height;
+	v4l2_info(sd, "!!!!!!!!! %s() complete successfully, width: %d, height: %d\n", __func__, fse->min_width, fse->min_height);
+	return 0;
+}
+
+static int tc358743_enum_frame_interval(struct v4l2_subdev *sd,
+				                        struct v4l2_subdev_pad_config  *cfg,
+				                        struct v4l2_subdev_frame_interval_enum *fie)
+{
+	const struct camera_common_frmfmt *frmfmt = tc358743_frmfmt;
+	int num_frmfmt = ARRAY_SIZE(tc358743_frmfmt);
+	int i;
+
+	v4l2_info(sd, "%s()\n", __func__);
+	v4l2_info(sd, "----------------------------------------\n");
+
+	v4l2_info(sd, "Trying to find frame interfval that matches fie->code, code: %d (UYVY: %d, ARGB32: %d, MEDIA_BUS_FMT_UYVY8_1X16: %d)\n", fie->code, V4L2_PIX_FMT_UYVY, V4L2_PIX_FMT_ARGB32, MEDIA_BUS_FMT_UYVY8_1X16);
+
+
+	if (fie->code != V4L2_PIX_FMT_UYVY && fie->code != MEDIA_BUS_FMT_UYVY8_1X16) {
+		v4l2_err(sd, "Unexpected code (%d), UYUV: %d, ABGR32: %d\n", fie->code, V4L2_PIX_FMT_UYVY, V4L2_PIX_FMT_ARGB32);
+		return -EINVAL;
+	}
+
+	v4l2_info(sd, "Code ok");
+
+	for (i = 0; i < num_frmfmt; i++) {
+		if (frmfmt[i].size.width == fie->width && frmfmt[i].size.height == fie->height) {
+			v4l2_info(sd, "Matched width %d and %d, height %d and %d", frmfmt[i].size.width, fie->width, frmfmt[i].size.height, fie->height);
+			break;
+		}
+	}
+
+	v4l2_info(sd, "w/h ok or end (i=%d, num=%d)", i, num_frmfmt);
+	
+	if (i >= num_frmfmt) {
+		v4l2_err(sd, "Error in %s, num frmfmt\n", __FUNCTION__);
+		return -EINVAL;
+	}
+
+	v4l2_info(sd, "i ok");
+
+	if (fie->index >= frmfmt[i].num_framerates) {
+		v4l2_err(sd, "Error in %s num framerates (%d outside %d)\n", __FUNCTION__, fie->index, frmfmt[i].num_framerates);
+		return -EINVAL;
+	}
+
+	v4l2_info(sd, "index ok");
+
+	fie->interval.numerator = 1;
+	fie->interval.denominator = frmfmt[i].framerates[fie->index];
+	v4l2_info(sd, "!!!!!!!!!! %s() completed successfully, interval: 1/%d\n", __func__, fie->interval.denominator);
+	return 0;
+}
+
+static int tc358743_s_power(struct v4l2_subdev *sd, int on)
+{
+	return 0;
+}
 static const struct v4l2_subdev_core_ops tc358743_core_ops = {
+	.s_power = tc358743_s_power,
 	.log_status = tc358743_log_status,
 #ifdef CONFIG_VIDEO_ADV_DEBUG
 	.g_register = tc358743_g_register,
@@ -1639,18 +2027,22 @@ static const struct v4l2_subdev_video_ops tc358743_video_ops = {
 	.g_input_status = tc358743_g_input_status,
 	.s_dv_timings = tc358743_s_dv_timings,
 	.g_dv_timings = tc358743_g_dv_timings,
-	.query_dv_timings = tc358743_query_dv_timings,
+	//.mbus_fmt	= tc358743_mbus_fmt,
 	.g_mbus_config = tc358743_g_mbus_config,
+	.query_dv_timings = tc358743_query_dv_timings,
 	.s_stream = tc358743_s_stream,
 };
 
 static const struct v4l2_subdev_pad_ops tc358743_pad_ops = {
+	.enum_mbus_code = tc358743_enum_mbus_code,
 	.set_fmt = tc358743_set_fmt,
 	.get_fmt = tc358743_get_fmt,
 	.get_edid = tc358743_g_edid,
 	.set_edid = tc358743_s_edid,
 	.enum_dv_timings = tc358743_enum_dv_timings,
 	.dv_timings_cap = tc358743_dv_timings_cap,
+	.enum_frame_size = tc358743_enum_frame_size,
+	.enum_frame_interval = tc358743_enum_frame_interval,
 };
 
 static const struct v4l2_subdev_ops tc358743_ops = {
@@ -1683,34 +2075,61 @@ static const struct v4l2_ctrl_config tc358743_ctrl_audio_present = {
 	.flags = V4L2_CTRL_FLAG_READ_ONLY,
 };
 
-/* --------------- PROBE / REMOVE --------------- */
+static bool tc358743_parse_dt(struct tc358743_platform_data *pdata,
+		struct i2c_client *client)
+{
+	struct device_node *node = client->dev.of_node;
+	const u32 *property;
+
+	v4l_dbg(1, debug, client, "Device Tree Parameters:\n");
+
+	pdata->reset_gpio = of_get_named_gpio(node, "reset-gpios", 0);
+	if (pdata->reset_gpio == 0)
+		return false;
+	v4l_dbg(1, debug, client, "reset_gpio = %d\n", pdata->reset_gpio);
+
+	property = of_get_property(node, "refclk_hz", NULL);
+	if (property == NULL)
+		return false;
+	pdata->refclk_hz = be32_to_cpup(property);
+	v4l_dbg(1, debug, client, "refclk_hz = %d\n", be32_to_cpup(property));
+
+	return true;
+}
 
 #ifdef CONFIG_OF
 static void tc358743_gpio_reset(struct tc358743_state *state)
 {
+
 	usleep_range(5000, 10000);
-	gpiod_set_value(state->reset_gpio, 1);
+	// TODO: Re-implement the reset GPIO!
+	//~ gpiod_set_value(state->reset_gpio, 1);
+    // gpio_set_value((int)state->reset_gpio, 1);
 	usleep_range(1000, 2000);
-	gpiod_set_value(state->reset_gpio, 0);
+    // gpio_set_value((int)state->reset_gpio, 0);
+	//~ gpiod_set_value(state->reset_gpio, 0);
 	msleep(20);
 }
+
+
 
 static int tc358743_probe_of(struct tc358743_state *state)
 {
 	struct device *dev = &state->i2c_client->dev;
 	struct v4l2_of_endpoint *endpoint;
 	struct device_node *ep;
-	struct clk *refclk;
+	// struct clk *refclk;
 	u32 bps_pr_lane;
 	int ret = -EINVAL;
 
-	refclk = devm_clk_get(dev, "refclk");
-	if (IS_ERR(refclk)) {
-		if (PTR_ERR(refclk) != -EPROBE_DEFER)
-			dev_err(dev, "failed to get refclk: %ld\n",
-				PTR_ERR(refclk));
-		return PTR_ERR(refclk);
-	}
+
+	// refclk = devm_clk_get(dev, "cam_mclk1");
+	// if (IS_ERR(refclk)) {
+	// 	if (PTR_ERR(refclk) != -EPROBE_DEFER)
+	// 		dev_err(dev, "failed to get refclk: %ld\n",
+	// 			PTR_ERR(refclk));
+	// 	return PTR_ERR(refclk);
+	// }
 
 	ep = of_graph_get_next_endpoint(dev->of_node, NULL);
 	if (!ep) {
@@ -1731,12 +2150,38 @@ static int tc358743_probe_of(struct tc358743_state *state)
 		goto free_endpoint;
 	}
 
-	state->bus = endpoint->bus.mipi_csi2;
+	pr_info("tc358743 endpoint->bus.mipi_csi2.flags %d\n",
+		endpoint->bus.mipi_csi2.flags);
+	pr_info("tc358743 endpoint->bus.mipi_csi2.clock_lane %d\n",
+		endpoint->bus.mipi_csi2.clock_lane);
+	pr_info("tc358743 endpoint->bus.mipi_csi2.num_data_lanes %d\n",
+		endpoint->bus.mipi_csi2.num_data_lanes);
+	pr_info("tc358743 endpoint->bus.mipi_csi2.data_lanes [%d-%d-%d-%d]\n",
+			endpoint->bus.mipi_csi2.data_lanes[0],
+			endpoint->bus.mipi_csi2.data_lanes[1],
+			endpoint->bus.mipi_csi2.data_lanes[2],
+			endpoint->bus.mipi_csi2.data_lanes[3]);
+    pr_info("tc358743 endpoint->nr_of_link_frequencies %d\n",
+    	endpoint->nr_of_link_frequencies);
 
-	clk_prepare_enable(refclk);
+	// state->bus = endpoint->bus.mipi_csi2;
+    // pr_info("tc358743 state->bus %s\n",state->bus);
+	// clk_prepare_enable(refclk);
 
-	state->pdata.refclk_hz = clk_get_rate(refclk);
+	// state->pdata.refclk_hz = clk_get_rate(refclk);
+    // if ((state->pdata.refclk_hz != 26000000) ||
+    //     (state->pdata.refclk_hz != 27000000) ||
+    //     (state->pdata.refclk_hz != 42000000))
+    // {
+    //     pr_info("Set new clock\n");
+    //     if (0 != clk_set_rate(refclk,27000000))
+    //     {
+    //         pr_info("Error: Set new clock\n");
+    //     }
+    // }
+
 	state->pdata.ddc5v_delay = DDC5V_DELAY_100_MS;
+	state->pdata.hdmi_detection_delay = HDMI_MODE_DELAY_100_MS;
 	state->pdata.enable_hdcp = false;
 	/* A FIFO level of 16 should be enough for 2-lane 720p60 at 594 MHz. */
 	state->pdata.fifo_level = 16;
@@ -1745,8 +2190,11 @@ static int tc358743_probe_of(struct tc358743_state *state)
 	 * It must be between 6 MHz and 40 MHz, lower frequency is better.
 	 */
 	switch (state->pdata.refclk_hz) {
+    //~ case 26322581:
+        //~ state->pdata.refclk_hz = 26322581;
 	case 26000000:
 	case 27000000:
+	//~ case 40800000: /* Tegra */
 	case 42000000:
 		state->pdata.pll_prd = state->pdata.refclk_hz / 6000000;
 		break;
@@ -1761,9 +2209,8 @@ static int tc358743_probe_of(struct tc358743_state *state)
 	 * The default is 594 Mbps for 4-lane 1080p60 or 2-lane 720p60.
 	 */
 	bps_pr_lane = 2 * endpoint->link_frequencies[0];
-	if (bps_pr_lane < 62500000U || bps_pr_lane > 1000000000U) {
+	if (bps_pr_lane < 62500000U || bps_pr_lane > 1188000000U) {
 		dev_err(dev, "unsupported bps per lane: %u bps\n", bps_pr_lane);
-		ret = -EINVAL;
 		goto disable_clk;
 	}
 
@@ -1778,6 +2225,10 @@ static int tc358743_probe_of(struct tc358743_state *state)
 	 */
 	if (bps_pr_lane != 594000000U)
 		dev_warn(dev, "untested bps per lane: %u bps\n", bps_pr_lane);
+	pr_info("tc358743 state->pdata.pll_prd=%d\r\n",state->pdata.pll_prd);
+	pr_info("tc358743 state->pdata.pll_fbd=%d\r\n",state->pdata.pll_fbd);
+
+	// freq = refclk / prd * fbd, default = 594 MHz
 	state->pdata.lineinitcnt = 0xe80;
 	state->pdata.lptxtimecnt = 0x003;
 	/* tclk-preparecnt: 3, tclk-zerocnt: 20 */
@@ -1788,24 +2239,61 @@ static int tc358743_probe_of(struct tc358743_state *state)
 	state->pdata.twakeup = 0x4882;
 	state->pdata.tclk_postcnt = 0x008;
 	state->pdata.ths_trailcnt = 0x2;
-	state->pdata.hstxvregcnt = 0;
+	state->pdata.hstxvregcnt = 2;//!!!2
+	
+/*richard you*/	
+// 	state->pdata.pll_fbd        = 144;//144
 
-	state->reset_gpio = devm_gpiod_get_optional(dev, "reset",
-						    GPIOD_OUT_LOW);
-	if (IS_ERR(state->reset_gpio)) {
-		dev_err(dev, "failed to get reset gpio\n");
-		ret = PTR_ERR(state->reset_gpio);
-		goto disable_clk;
-	}
+// 	// timing setting
+// //case 972000000U:
+// 	state->pdata.lineinitcnt = 0xFA0;
+// 	state->pdata.lptxtimecnt = 0x007;
+// 		/* tclk-preparecnt: 6, tclk-zerocnt: 40 */
+// 	state->pdata.tclk_headercnt = 0x2806;
+// 	state->pdata.tclk_trailcnt = 0x00;
+// 		/* ths-preparecnt: 3, ths-zerocnt: 1 */
+// 	state->pdata.ths_headercnt = 0x0806;
+// 	state->pdata.twakeup = 0x4268;
+// 	state->pdata.tclk_postcnt = 0x008;
+// 	state->pdata.ths_trailcnt = 0x5;
+// 	state->pdata.hstxvregcnt = 0;
+// 	to see if below is fucking things up given it *should*
+// 	be calculated based on actual info
+		//state->pdata.pll_fbd        = 176;//144
 
-	if (state->reset_gpio)
+	// timing setting
+//case 972000000U:
+	state->pdata.lineinitcnt = 0x1d01;//
+	state->pdata.lptxtimecnt = 0x008;//
+		/* tclk-preparecnt: 6, tclk-zerocnt: 45 */
+	state->pdata.tclk_headercnt = 0x2D06;//0x0218
+	state->pdata.tclk_trailcnt = 0x09;//
+		/* ths-preparecnt: 7, ths-zerocnt: 17 */
+	state->pdata.ths_headercnt = 0xd06;//0x0220
+	state->pdata.twakeup = 0x4883;//
+	state->pdata.tclk_postcnt = 0x010;//
+	state->pdata.ths_trailcnt = 0xA;//
+	state->pdata.hstxvregcnt = 5;//5
+
+
+	
+	//~ state->reset_gpio = devm_gpiod_get_optional(dev, "reset",
+						    //~ GPIOD_OUT_LOW);
+	//~ if (IS_ERR(state->reset_gpio)) {
+		//~ dev_err(dev, "failed to get reset gpio\n");
+		//~ ret = PTR_ERR(state->reset_gpio);
+		//~ goto disable_clk;
+	//~ }
+
+	if (state->reset_gpio) {
+		pr_info("Calling reset GPIO but NOT IMPLEMENTED!");
 		tc358743_gpio_reset(state);
-
+	}
 	ret = 0;
 	goto free_endpoint;
 
 disable_clk:
-	clk_disable_unprepare(refclk);
+	//clk_disable_unprepare(refclk);
 free_endpoint:
 	v4l2_of_free_endpoint(endpoint);
 	return ret;
@@ -1817,32 +2305,67 @@ static inline int tc358743_probe_of(struct tc358743_state *state)
 }
 #endif
 
+static int tc358743_open(struct v4l2_subdev *sd, struct v4l2_subdev_fh *fh)
+{
+	return 0;
+}
+
+static const struct v4l2_subdev_internal_ops tc358743_subdev_internal_ops = {
+	.open = tc358743_open,
+};
+
+static const struct media_entity_operations tc358743_media_ops = {
+	.link_validate = v4l2_subdev_link_validate,
+};
+
+
+static const struct regmap_config sensor_regmap_config = {
+	.reg_bits = 16,
+	.val_bits = 8,
+	.cache_type = REGCACHE_RBTREE,
+};
+
 static int tc358743_probe(struct i2c_client *client,
 			  const struct i2c_device_id *id)
 {
 	static struct v4l2_dv_timings default_timing =
-		V4L2_DV_BT_CEA_640X480P59_94;
+        // V4L2_DV_BT_CEA_1920X1080P50;
+        V4L2_DV_BT_CEA_1920X1080P60;
+	// set edid
+//    struct v4l2_subdev_edid sd_edid = {
+//		.blocks = 2,
+//		.edid = edid,
+//	};
 	struct tc358743_state *state;
 	struct tc358743_platform_data *pdata = client->dev.platform_data;
 	struct v4l2_subdev *sd;
 	int err;
+	u16 chip_id_val;
+
+    // pr_info("%s %s %s\n",__FUNCTION__,__DATE__,__TIME__);
 
 	if (!i2c_check_functionality(client->adapter, I2C_FUNC_SMBUS_BYTE_DATA))
 		return -EIO;
 	v4l_dbg(1, debug, client, "chip found @ 0x%x (%s)\n",
-		client->addr << 1, client->adapter->name);
+		client->addr, client->adapter->name);
 
 	state = devm_kzalloc(&client->dev, sizeof(struct tc358743_state),
 			GFP_KERNEL);
 	if (!state)
 		return -ENOMEM;
+    if (client->dev.of_node) {
+        if (!tc358743_parse_dt(&state->pdata, client)) {
+            pr_err("Couldn't parse device tree\n");
+            return -ENODEV;
+        }
+    }
 
 	state->i2c_client = client;
 
 	/* platform data */
 	if (pdata) {
 		state->pdata = *pdata;
-		state->bus.flags = V4L2_MBUS_CSI2_CONTINUOUS_CLOCK;
+		pdata->endpoint.bus.mipi_csi2.flags = V4L2_MBUS_CSI2_CONTINUOUS_CLOCK;
 	} else {
 		err = tc358743_probe_of(state);
 		if (err == -ENODEV)
@@ -1853,27 +2376,36 @@ static int tc358743_probe(struct i2c_client *client,
 
 	sd = &state->sd;
 	v4l2_i2c_subdev_init(sd, client, &tc358743_ops);
+	v4l2_info(sd,"Subdev init done\n");
 	sd->flags |= V4L2_SUBDEV_FL_HAS_DEVNODE | V4L2_SUBDEV_FL_HAS_EVENTS;
 
 	/* i2c access */
-	if ((i2c_rd16(sd, CHIPID) & MASK_CHIPID) != 0) {
-		v4l2_info(sd, "not a TC358743 on address 0x%x\n",
-			  client->addr << 1);
+	chip_id_val = i2c_rd16(sd, CHIPID);
+	v4l2_info(sd,"Chip ID val: %d\n", chip_id_val);
+
+	if ((chip_id_val & MASK_CHIPID) != 0 || chip_id_val == 99) {
+        v4l2_info(sd,"tc358743: ERROR: not a TC358743 on address0x%x\n",
+			  client->addr);
 		return -ENODEV;
 	}
-
+	
 	/* control handlers */
 	v4l2_ctrl_handler_init(&state->hdl, 3);
+	v4l2_info(sd, "ctrl handler initied\n");
 
+	/* custom controls */
 	state->detect_tx_5v_ctrl = v4l2_ctrl_new_std(&state->hdl, NULL,
 			V4L2_CID_DV_RX_POWER_PRESENT, 0, 1, 0, 0);
 
-	/* custom controls */
 	state->audio_sampling_rate_ctrl = v4l2_ctrl_new_custom(&state->hdl,
 			&tc358743_ctrl_audio_sampling_rate, NULL);
+	 v4l2_info(sd,"tc358743_ctrl_audio_sampling_rate %d",
+	 		  get_audio_sampling_rate(sd));
 
 	state->audio_present_ctrl = v4l2_ctrl_new_custom(&state->hdl,
 			&tc358743_ctrl_audio_present, NULL);
+	 v4l2_info(sd,"tc358743_ctrl_audio_present %s",
+	 		  (audio_present(sd)? "yes":"no"));
 
 	sd->ctrl_handler = &state->hdl;
 	if (state->hdl.error) {
@@ -1886,55 +2418,87 @@ static int tc358743_probe(struct i2c_client *client,
 		goto err_hdl;
 	}
 
-	state->pad.flags = MEDIA_PAD_FL_SOURCE;
-	err = media_entity_pads_init(&sd->entity, 1, &state->pad);
-	if (err < 0)
+	v4l2_info(sd, "Controls updated\n");
+
+	/* work queues */
+	state->work_queues = create_singlethread_workqueue(client->name);
+	if (!state->work_queues) {
+		v4l2_err(sd, "Could not create work queue\n");
+		err = -ENOMEM;
 		goto err_hdl;
-
-	sd->dev = &client->dev;
-	err = v4l2_async_register_subdev(sd);
-	if (err < 0)
-		goto err_hdl;
-
-	mutex_init(&state->confctl_mutex);
-
+	}
+	v4l2_info(sd, "Work queue created\n");
 	INIT_DELAYED_WORK(&state->delayed_work_enable_hotplug,
 			tc358743_delayed_work_enable_hotplug);
+	INIT_DELAYED_WORK(&state->delayed_work_enable_interrupt,
+			tc358743_delayed_work_enable_interrupt);
+	INIT_WORK(&state->process_isr, tc358743_process_isr);
+	mutex_init(&state->isr_lock);
+
+
+	// sd->entity.type = MEDIA_ENT_T_V4L2_SUBDEV_SENSOR;
+	sd->entity.ops = &tc358743_media_ops;
+	state->pad.flags = MEDIA_PAD_FL_SOURCE;
+	v4l2_info(sd, "About to call tegra_media_entity_init\n");
+	err = tegra_media_entity_init(&sd->entity, 1, &state->pad, true, true);
+	if (err < 0)
+		goto err_hdl;
+	v4l2_info(sd, "tegra_media_entity_init complete\n");
+
+	state->mbus_fmt_code = MEDIA_BUS_FMT_UYVY8_1X16;
+
+	v4l2_info(sd, "Set mbus_fmt_code in probe to: %d\n", state->mbus_fmt_code);
+
+	sd->dev = &client->dev;
+	v4l2_info(sd, "About to register subdev\n");
+	err = v4l2_async_register_subdev(sd);
+	v4l_dbg(1, debug, client, "Register subdev: %d\n", err);
+
+	if (err < 0)
+		goto err_hdl;
 
 	tc358743_initial_setup(sd);
-
+	
+	tc358743_set_csi_color_space(sd);
+	v4l2_info(sd,"before tc358743_s_dv_timings\n");
 	tc358743_s_dv_timings(sd, &default_timing);
 
-	state->mbus_fmt_code = MEDIA_BUS_FMT_RGB888_1X24;
-	tc358743_set_csi_color_space(sd);
-
-	tc358743_init_interrupts(sd);
-
+	v4l2_info(sd,"@@@@before tc358743_init_interrupts, irq: %d\n", state->i2c_client->irq);
+	tc358743_log_status(sd);//changede by sunnyxia
 	if (state->i2c_client->irq) {
-		err = devm_request_threaded_irq(&client->dev,
-						state->i2c_client->irq,
+		v4l2_info(sd,"IRQ setup\n");
+		err = devm_request_threaded_irq(&state->i2c_client->dev,
+						client->irq,
 						NULL, tc358743_irq_handler,
-						IRQF_TRIGGER_HIGH | IRQF_ONESHOT,
-						"tc358743", state);
+						IRQF_TRIGGER_RISING | IRQF_ONESHOT | IRQF_TIMER,
+						sd->name, (void *)sd);
 		if (err)
-			goto err_work_queues;
+			goto err_hdl;
 	}
+
+	v4l2_info(sd,"after tc358743_init_interrupts, irq: %d %d\n", state->i2c_client->irq, client->irq);
+	queue_delayed_work(state->work_queues,
+		&state->delayed_work_enable_interrupt,
+		msecs_to_jiffies(DELAY_ENABLE_INTERRUPT_MS));
 
 	tc358743_enable_interrupts(sd, tx_5v_power_present(sd));
 	i2c_wr16(sd, INTMASK, ~(MASK_HDMI_MSK | MASK_CSI_MSK) & 0xffff);
 
 	err = v4l2_ctrl_handler_setup(sd->ctrl_handler);
+
 	if (err)
-		goto err_work_queues;
+		goto err_hdl;
 
 	v4l2_info(sd, "%s found @ 0x%x (%s)\n", client->name,
-		  client->addr << 1, client->adapter->name);
+		  client->addr, client->adapter->name);
+	//tc358743_s_edid(sd, &sd_edid);
 
+	//tc358743_g_edid(sd, &sd_edid);
+
+	tc358743_log_status(sd);
+	v4l2_info(sd,"#########################Probe complete\n");
 	return 0;
 
-err_work_queues:
-	cancel_delayed_work(&state->delayed_work_enable_hotplug);
-	mutex_destroy(&state->confctl_mutex);
 err_hdl:
 	media_entity_cleanup(&sd->entity);
 	v4l2_ctrl_handler_free(&state->hdl);
@@ -1945,11 +2509,11 @@ static int tc358743_remove(struct i2c_client *client)
 {
 	struct v4l2_subdev *sd = i2c_get_clientdata(client);
 	struct tc358743_state *state = to_state(sd);
-
+	
 	cancel_delayed_work(&state->delayed_work_enable_hotplug);
+	destroy_workqueue(state->work_queues);
 	v4l2_async_unregister_subdev(sd);
 	v4l2_device_unregister_subdev(sd);
-	mutex_destroy(&state->confctl_mutex);
 	media_entity_cleanup(&sd->entity);
 	v4l2_ctrl_handler_free(&state->hdl);
 
